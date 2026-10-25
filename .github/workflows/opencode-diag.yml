@@ -59,6 +59,31 @@ jobs:
           export OPENCODE_DISABLE_AUTOUPDATE=1
           cd "$GITHUB_WORKSPACE/opencode"
           port=4200
+          # Reproduce the apps job: same HOME, the CLI step's commands first, then serve without --print-logs.
+          export HOME="$RUNNER_TEMP/home" && mkdir -p "$HOME"
+          o=$GITHUB_WORKSPACE/legacy/ci/old-cpus.sh
+          for a in "--version" "models" "debug info" "debug config" "debug paths" "debug file search package.json" "debug rg search --limit 3 OPENCODE_VERSION"; do
+            timeout 300 bash $o "$oc" $a >/dev/null 2>&1; echo "cli $a -> $?"
+          done
+          echo "--- leftovers after the CLI step ---"; ps -eo pid,ppid,pgid,stat,etime,args | grep -E 'opencode|qemu' | grep -v grep | cut -c1-200
+          for try in 1 2; do
+            port=$((port+1))
+            setsid qemu-x86_64 -cpu Conroe "$oc" serve --port $port --hostname 127.0.0.1 >"$RUNNER_TEMP/serve-repro$try.log" 2>&1 &
+            pid=$!; t0=$(date +%s) ok=0
+            for i in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://127.0.0.1:$port/config)
+              echo "[repro$try] t=$(( $(date +%s) - t0 ))s /config -> $code"
+              [ "$code" = 200 ] && { ok=1; break; }
+              sleep 3
+            done
+            if [ $ok = 0 ]; then
+              echo "--- all opencode/qemu processes ---"; ps -eo pid,ppid,pgid,stat,etime,pcpu,args | grep -E 'opencode|qemu' | grep -v grep | cut -c1-200
+              echo "--- open files under HOME ---"; for p in $(pgrep -f 'opencode'); do sudo ls -l /proc/$p/fd 2>/dev/null | grep -E "$HOME|sqlite|\.db" | sed "s/^/$p /"; done
+              ls -laR "$HOME/.local/share/opencode" 2>/dev/null | head -40
+              cat "$RUNNER_TEMP/serve-repro$try.log" | tail -40
+            fi
+            kill -- -$pid 2>/dev/null; sleep 3; kill -9 -- -$pid 2>/dev/null
+          done
           for mode in native Conroe; do
             port=$((port+1))
             export HOME="$RUNNER_TEMP/home-$mode" && mkdir -p "$HOME"
