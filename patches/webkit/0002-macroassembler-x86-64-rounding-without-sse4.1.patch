@@ -1,0 +1,266 @@
+diff --git a/Source/JavaScriptCore/assembler/MacroAssemblerX86_64.h b/Source/JavaScriptCore/assembler/MacroAssemblerX86_64.h
+index c4ebc224..8d1a1d6e 100644
+--- a/Source/JavaScriptCore/assembler/MacroAssemblerX86_64.h
++++ b/Source/JavaScriptCore/assembler/MacroAssemblerX86_64.h
+@@ -1360,8 +1360,79 @@ public:
+         }
+     }
+ 
++    enum class LegacyRounding : uint8_t { Floor, Ceil, Trunc, Nearest };
++
++    // bun-legacy: roundsd/roundss are SSE4.1. Callers like the DFG check supportsFloatingPointRounding() first, but
++    // the wasm BBQ and OMG tiers call these unconditionally, which SIGILLs on Core 2 / Pentium Dual-Core / Athlon 64.
++    // Without SSE4.1, round through a 64-bit integer with SSE2 instead, keeping roundsd/roundss semantics: the sign
++    // of zero, NaN quieted, and values too large to have a fraction (and infinities) returned unchanged. Uses only
++    // the macro scratch registers (r11, xmm15), so src may equal dst.
++    template<bool isFloat>
++    void roundWithoutSSE4_1(FPRegisterID src, FPRegisterID dst, LegacyRounding mode)
++    {
++        RegisterID integer = scratchRegister();
++        FPRegisterID x = fpTempRegister;
++        moveDouble(src, x);
++        // cvt*2si rounds as MXCSR says, which JSC leaves at round to nearest, ties to even.
++        if (mode == LegacyRounding::Nearest) {
++            if constexpr (isFloat)
++                m_assembler.cvtss2siq_rr(x, integer);
++            else
++                m_assembler.cvtsd2siq_rr(x, integer);
++        } else {
++            if constexpr (isFloat)
++                m_assembler.cvttss2siq_rr(x, integer);
++            else
++                m_assembler.cvttsd2siq_rr(x, integer);
++        }
++        // NaN, infinities and |x| >= 2^63 give INT64_MIN. Doubling overflows for it and for every |result| >= 2^62,
++        // where x has no fractional part anyway.
++        Jump special = branchAdd64(Overflow, integer, integer);
++        rshift64(TrustedImm32(1), integer);
++        auto convert = [&] {
++            if constexpr (isFloat)
++                m_assembler.cvtsi2ssq_rr(integer, dst);
++            else
++                m_assembler.cvtsi2sdq_rr(integer, dst);
++        };
++        convert();
++        if (mode == LegacyRounding::Floor || mode == LegacyRounding::Ceil) {
++            // Truncation went the wrong way for a negative (floor) or positive (ceil) non-integer: step once.
++            DoubleCondition alreadyRight = mode == LegacyRounding::Floor ? DoubleLessThanOrEqualAndOrdered : DoubleGreaterThanOrEqualAndOrdered;
++            Jump exact = isFloat ? branchFloat(alreadyRight, dst, x) : branchDouble(alreadyRight, dst, x);
++            if (mode == LegacyRounding::Floor)
++                sub64(TrustedImm32(1), integer);
++            else
++                add64(TrustedImm32(1), integer);
++            convert();
++            exact.link(this);
++        }
++        // A zero result has the sign of x: dst is +0 here, so 0 * x.
++        Jump nonZero = branchTest64(NonZero, integer, integer);
++        if constexpr (isFloat)
++            m_assembler.mulss_rr(x, dst);
++        else
++            m_assembler.mulsd_rr(x, dst);
++        nonZero.link(this);
++        Jump done = jump();
++
++        special.link(this);
++        moveDouble(x, dst);
++        Jump notNaN = isFloat ? branchFloat(DoubleEqualAndOrdered, x, x) : branchDouble(DoubleEqualAndOrdered, x, x);
++        if constexpr (isFloat)
++            m_assembler.addss_rr(dst, dst);
++        else
++            m_assembler.addsd_rr(dst, dst);
++        notNaN.link(this);
++        done.link(this);
++    }
++
+     void ceilDouble(FPRegisterID src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            roundWithoutSSE4_1<false>(src, dst, LegacyRounding::Ceil);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundsd_i8rrr(X86Assembler::RoundingType::TowardInfiniti, src, dst, dst);
+         else
+@@ -1370,6 +1441,11 @@ public:
+ 
+     void ceilDouble(Address src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            loadDouble(src, dst);
++            ceilDouble(dst, dst);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundsd_i8mrr(X86Assembler::RoundingType::TowardInfiniti, src.offset, src.base, dst, dst);
+         else
+@@ -1378,6 +1454,10 @@ public:
+ 
+     void ceilFloat(FPRegisterID src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            roundWithoutSSE4_1<true>(src, dst, LegacyRounding::Ceil);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundss_i8rrr(X86Assembler::RoundingType::TowardInfiniti, src, dst, dst);
+         else
+@@ -1386,6 +1466,11 @@ public:
+ 
+     void ceilFloat(Address src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            loadFloat(src, dst);
++            ceilFloat(dst, dst);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundss_i8mrr(X86Assembler::RoundingType::TowardInfiniti, src.offset, src.base, dst, dst);
+         else
+@@ -1394,6 +1479,10 @@ public:
+ 
+     void floorDouble(FPRegisterID src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            roundWithoutSSE4_1<false>(src, dst, LegacyRounding::Floor);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundsd_i8rrr(X86Assembler::RoundingType::TowardNegativeInfiniti, src, dst, dst);
+         else
+@@ -1402,6 +1491,11 @@ public:
+ 
+     void floorDouble(Address src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            loadDouble(src, dst);
++            floorDouble(dst, dst);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundsd_i8mrr(X86Assembler::RoundingType::TowardNegativeInfiniti, src.offset, src.base, dst, dst);
+         else
+@@ -1410,6 +1504,10 @@ public:
+ 
+     void floorFloat(FPRegisterID src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            roundWithoutSSE4_1<true>(src, dst, LegacyRounding::Floor);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundss_i8rrr(X86Assembler::RoundingType::TowardNegativeInfiniti, src, dst, dst);
+         else
+@@ -1418,6 +1516,11 @@ public:
+ 
+     void floorFloat(Address src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            loadFloat(src, dst);
++            floorFloat(dst, dst);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundss_i8mrr(X86Assembler::RoundingType::TowardNegativeInfiniti, src.offset, src.base, dst, dst);
+         else
+@@ -1446,6 +1549,10 @@ public:
+ 
+     void roundTowardNearestIntDouble(FPRegisterID src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            roundWithoutSSE4_1<false>(src, dst, LegacyRounding::Nearest);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundsd_i8rrr(X86Assembler::RoundingType::ToNearestWithTiesToEven, src, dst, dst);
+         else
+@@ -1454,6 +1561,10 @@ public:
+ 
+     void roundTowardNearestIntFloat(FPRegisterID src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            roundWithoutSSE4_1<true>(src, dst, LegacyRounding::Nearest);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundss_i8rrr(X86Assembler::RoundingType::ToNearestWithTiesToEven, src, dst, dst);
+         else
+@@ -1462,6 +1573,10 @@ public:
+ 
+     void roundTowardZeroDouble(FPRegisterID src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            roundWithoutSSE4_1<false>(src, dst, LegacyRounding::Trunc);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundsd_i8rrr(X86Assembler::RoundingType::TowardZero, src, dst, dst);
+         else
+@@ -1470,6 +1585,11 @@ public:
+ 
+     void roundTowardZeroDouble(Address src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            loadDouble(src, dst);
++            roundTowardZeroDouble(dst, dst);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundsd_i8mrr(X86Assembler::RoundingType::TowardZero, src.offset, src.base, dst, dst);
+         else
+@@ -1478,6 +1598,10 @@ public:
+ 
+     void roundTowardZeroFloat(FPRegisterID src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            roundWithoutSSE4_1<true>(src, dst, LegacyRounding::Trunc);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundss_i8rrr(X86Assembler::RoundingType::TowardZero, src, dst, dst);
+         else
+@@ -1486,6 +1610,11 @@ public:
+ 
+     void roundTowardZeroFloat(Address src, FPRegisterID dst)
+     {
++        if (!supportsFloatingPointRounding()) {
++            loadFloat(src, dst);
++            roundTowardZeroFloat(dst, dst);
++            return;
++        }
+         if (supportsAVX())
+             m_assembler.vroundss_i8mrr(X86Assembler::RoundingType::TowardZero, src.offset, src.base, dst, dst);
+         else
+diff --git a/Source/JavaScriptCore/assembler/X86Assembler.h b/Source/JavaScriptCore/assembler/X86Assembler.h
+index d050cb55..2f17d802 100644
+--- a/Source/JavaScriptCore/assembler/X86Assembler.h
++++ b/Source/JavaScriptCore/assembler/X86Assembler.h
+@@ -266,6 +266,8 @@ private:
+         OP2_CVTSI2SD_VsdEd              = 0x2A,
+         OP2_CVTTSD2SI_GdWsd             = 0x2C,
+         OP2_CVTTSS2SI_GdWsd             = 0x2C,
++        OP2_CVTSD2SI_GdWsd              = 0x2D,
++        OP2_CVTSS2SI_GdWsd              = 0x2D,
+         OP2_UCOMISS_VssWss              = 0x2E,
+         OP2_UCOMISD_VsdWsd              = 0x2E,
+         OP2_RDTSC                       = 0x31,
+@@ -3670,6 +3672,19 @@ public:
+         m_formatter.twoByteOp64(OP2_CVTTSS2SI_GdWsd, dst, (RegisterID)src);
+     }
+ 
++    // Convert with the MXCSR rounding mode (round to nearest, ties to even, in JSC), not truncation.
++    void cvtsd2siq_rr(XMMRegisterID src, RegisterID dst)
++    {
++        m_formatter.prefix(PRE_SSE_F2);
++        m_formatter.twoByteOp64(OP2_CVTSD2SI_GdWsd, dst, (RegisterID)src);
++    }
++
++    void cvtss2siq_rr(XMMRegisterID src, RegisterID dst)
++    {
++        m_formatter.prefix(PRE_SSE_F3);
++        m_formatter.twoByteOp64(OP2_CVTSS2SI_GdWsd, dst, (RegisterID)src);
++    }
++
+     void cvtsd2ss_rr(XMMRegisterID src, XMMRegisterID dst)
+     {
+         m_formatter.prefix(PRE_SSE_F2);
