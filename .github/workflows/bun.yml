@@ -116,6 +116,8 @@ jobs:
           bash legacy/ci/old-cpus.sh "$b" --version
           bash legacy/ci/old-cpus.sh "$b" -e 'console.log(process.versions.bun, Bun.revision)'
           bash legacy/ci/old-cpus.sh "$b" legacy/ci/bun-smoke.ts
+          # WebAssembly in the interpreter only (IPInt is offlineasm code, not the JIT's CPU-checked code generator).
+          BUN_JSC_useBBQJIT=0 BUN_JSC_useOMGJIT=0 bash legacy/ci/old-cpus.sh "$b" legacy/ci/jit-smoke.js
       - name: Publish release bun-v${{ inputs.bun_version }}-legacy
         env:
           GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,126 @@
+diff --git a/Source/JavaScriptCore/offlineasm/x86.rb b/Source/JavaScriptCore/offlineasm/x86.rb
+index 609109ca..5b04ea2f 100644
+--- a/Source/JavaScriptCore/offlineasm/x86.rb
++++ b/Source/JavaScriptCore/offlineasm/x86.rb
+@@ -959,6 +959,89 @@ class Instruction
+         ]).lower($activeBackend)
+     end
+ 
++    # bun-legacy: roundss/roundsd are SSE4.1, which Core 2 / Pentium Dual-Core / Athlon 64 lack, and IPInt (the wasm
++    # interpreter) uses them for f32/f64 ceil, floor, trunc and nearest without a CPU check. This lowers them to
++    # SSE2, with the semantics roundss/roundsd have: -0.0 and signs are kept, NaN is quieted, |x| >= 2^52 (2^23) and
++    # infinities are returned as they are, and nearest rounds half to even.
++    def lowerX86RoundingSSE2(kind, mode)
++        src = operands[0]
++        dst = operands[1]
++        gpr = X64_SCRATCH_REGISTER
++        fpr = X64_SCRATCH_FPR
++        scratchName = fpr.x86Operand(:double)
++        raise "#{opcode}: source and destination must differ at #{codeOriginString}" if src.x86Operand(:double) == dst.x86Operand(:double)
++        raise "#{opcode}: #{scratchName} is the scratch FPR at #{codeOriginString}" if [src, dst].any? { |op| op.x86Operand(:double) == scratchName }
++
++        if kind == :float
++            s, toInt, toFp, lshift, urshift, branchIfSign = "f", "ff2i", "fi2f", "lshifti", "urshifti", "btis"
++            one, minusOne, magic = 0x3f800000, 0xbf800000, 0x4b000000
++        else
++            s, toInt, toFp, lshift, urshift, branchIfSign = "d", "fd2q", "fq2d", "lshiftq", "urshiftq", "btqs"
++            one, minusOne, magic = 0x3ff0000000000000, 0xbff0000000000000, 0x4330000000000000
++        end
++        imm = lambda { |value| Immediate.new(codeOrigin, value) }
++        ins = lambda { |name, *args| Instruction.new(codeOrigin, name, args) }
++        ref = lambda { |label| LocalLabelReference.new(codeOrigin, label) }
++        special = LocalLabel.unique(codeOrigin, "roundSpecial")
++        done = LocalLabel.unique(codeOrigin, "roundDone")
++
++        list = []
++        if mode == :nearest
++            negative = LocalLabel.unique(codeOrigin, "roundNegative")
++            list += [
++                # fpr = |x|, dst = 2^52 (2^23 for float).
++                ins.call(toInt, src, gpr), ins.call(lshift, imm.call(1), gpr), ins.call(urshift, imm.call(1), gpr), ins.call(toFp, gpr, fpr),
++                ins.call("move", imm.call(magic), gpr), ins.call(toFp, gpr, dst),
++                ins.call("b#{s}gtequn", fpr, dst, ref.call(special)),
++                # |x| + 2^52 - 2^52 rounds |x| to an integer, half to even (MXCSR is round-to-nearest in JSC).
++                ins.call("add#{s}", dst, fpr), ins.call("sub#{s}", dst, fpr),
++                ins.call(toInt, src, gpr), ins.call(branchIfSign, gpr, ref.call(negative)),
++                ins.call("moved", fpr, dst), ins.call("jmp", ref.call(done)),
++                negative,
++                ins.call("move", imm.call(minusOne), gpr), ins.call(toFp, gpr, dst), ins.call("mul#{s}", fpr, dst),
++                ins.call("jmp", ref.call(done)),
++            ]
++        else
++            adjusted = LocalLabel.unique(codeOrigin, "roundAdjusted")
++            zero = LocalLabel.unique(codeOrigin, "roundZero")
++            list += [
++                # gpr = trunc(x). NaN, infinities and |x| >= 2^63 give INT64_MIN; doubling overflows for it and for
++                # every |trunc(x)| >= 2^62, all of which are integers already.
++                ins.call("truncate#{s}2qs", src, gpr),
++                ins.call("baddqo", gpr, gpr, ref.call(special)),
++                ins.call("rshiftq", imm.call(1), gpr),
++                ins.call("cq2#{s}s", gpr, fpr),
++            ]
++            case mode
++            when :floor
++                list += [ins.call("b#{s}gtequn", src, fpr, ref.call(adjusted)),
++                         ins.call("move", imm.call(one), gpr), ins.call(toFp, gpr, dst), ins.call("sub#{s}", dst, fpr)]
++            when :ceil
++                list += [ins.call("b#{s}gtequn", fpr, src, ref.call(adjusted)),
++                         ins.call("move", imm.call(one), gpr), ins.call(toFp, gpr, dst), ins.call("add#{s}", dst, fpr)]
++            end
++            list += [
++                adjusted,
++                # A zero result takes the sign of x: 0 * x.
++                ins.call("move", imm.call(0), gpr), ins.call(toFp, gpr, dst),
++                ins.call("b#{s}eq", fpr, dst, ref.call(zero)),
++                ins.call("moved", fpr, dst), ins.call("jmp", ref.call(done)),
++                zero,
++                ins.call("mul#{s}", src, dst),
++                ins.call("jmp", ref.call(done)),
++            ]
++        end
++        list += [
++            special,
++            # Already an integer, infinite or NaN: x itself, with a NaN quieted as roundss/roundsd do.
++            ins.call("moved", src, dst),
++            ins.call("b#{s}eq", src, src, ref.call(done)),
++            ins.call("add#{s}", dst, dst),
++            done,
++        ]
++        Sequence.new(codeOrigin, list).lower($activeBackend)
++    end
++
+     def convertQuadToFloatingPoint(kind)
+         src = operands[0]
+         scratch1 = operands[1]
+@@ -1166,22 +1249,15 @@ class Instruction
+             $asm.puts "sqrtss #{orderOperands(operands[0].x86Operand(:float), operands[1].x86Operand(:float))}"
+         when "sqrtd"
+             $asm.puts "sqrtsd #{orderOperands(operands[0].x86Operand(:double), operands[1].x86Operand(:double))}"
+-        when "roundf"
+-            $asm.puts "roundss #{const(0)}, #{operands[0].x86Operand(:double)}, #{operands[1].x86Operand(:double)}"
+-        when "roundd"
+-            $asm.puts "roundsd #{const(0)}, #{operands[0].x86Operand(:double)}, #{operands[1].x86Operand(:double)}"
+-        when "floorf"
+-            $asm.puts "roundss #{const(1)}, #{operands[0].x86Operand(:double)}, #{operands[1].x86Operand(:double)}"
+-        when "floord"
+-            $asm.puts "roundsd #{const(1)}, #{operands[0].x86Operand(:double)}, #{operands[1].x86Operand(:double)}"
+-        when "ceilf"
+-            $asm.puts "roundss #{const(2)}, #{operands[0].x86Operand(:double)}, #{operands[1].x86Operand(:double)}"
+-        when "ceild"
+-            $asm.puts "roundsd #{const(2)}, #{operands[0].x86Operand(:double)}, #{operands[1].x86Operand(:double)}"
+-        when "truncatef"
+-            $asm.puts "roundss #{const(3)}, #{operands[0].x86Operand(:double)}, #{operands[1].x86Operand(:double)}"
+-        when "truncated"
+-            $asm.puts "roundsd #{const(3)}, #{operands[0].x86Operand(:double)}, #{operands[1].x86Operand(:double)}"
++        when "roundf", "roundd", "floorf", "floord", "ceilf", "ceild", "truncatef", "truncated"
++            kind = opcode.end_with?("f") ? :float : :double
++            mode = { "round" => :nearest, "floor" => :floor, "ceil" => :ceil, "truncate" => :trunc }[opcode[0..-2]]
++            if $activeBackend == "X86_64"
++                lowerX86RoundingSSE2(kind, mode)
++            else
++                imm = { nearest: 0, floor: 1, ceil: 2, trunc: 3 }[mode]
++                $asm.puts "rounds#{kind == :float ? "s" : "d"} #{const(imm)}, #{operands[0].x86Operand(:double)}, #{operands[1].x86Operand(:double)}"
++            end
+         when "truncatef2i"
+             $asm.puts "cvttss2si #{orderOperands(operands[0].x86Operand(:float), operands[1].x86Operand(:quad))}"
+         when "truncated2i"

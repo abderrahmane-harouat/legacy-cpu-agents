@@ -46,6 +46,23 @@ jobs:
             !Websites/
             !ManualTests/
             !WebDriverTests/
+      - name: Control (one-off) — the unpatched legacy jsc must SIGILL in IPInt rounding
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user >/dev/null
+          mkdir -p "$RUNNER_TEMP/prev" && cd "$RUNNER_TEMP/prev"
+          gh release download "autobuild-$SHA" -R "$GITHUB_REPOSITORY" -p bun-webkit-linux-amd64.tar.gz
+          tar xzf bun-webkit-linux-amd64.tar.gz bun-webkit/bin/jsc
+          CPUS=Conroe bash "$GITHUB_WORKSPACE/legacy/ci/old-cpus.sh" --expect-sigill ./bun-webkit/bin/jsc \
+            --useBBQJIT=false --useOMGJIT=false "$GITHUB_WORKSPACE/legacy/ci/jit-smoke.js"
+      - name: Apply legacy-CPU patches
+        run: |
+          set -euo pipefail
+          for p in legacy/patches/webkit/*.patch; do echo "applying $p"; git -C webkit apply --verbose "$GITHUB_WORKSPACE/$p"; done
       - uses: docker/setup-buildx-action@v3
       - name: Build JavaScriptCore + ICU (-march=x86-64 -mcx16 -msahf)
         id: build
@@ -83,6 +100,8 @@ jobs:
         run: |
           bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/bun-webkit/bin/jsc" --thresholdForJITAfterWarmUp=10 \
             --thresholdForOptimizeAfterWarmUp=20 --thresholdForFTLOptimizeAfterWarmUp=50 legacy/ci/jit-smoke.js
+      - name: jsc with WebAssembly in the interpreter only (IPInt, no BBQ/OMG)
+        run: bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/bun-webkit/bin/jsc" --useBBQJIT=false --useOMGJIT=false legacy/ci/jit-smoke.js
       - name: Publish release autobuild-${{ steps.sha.outputs.sha }}
         env:
           GH_TOKEN: ${{ github.token }}

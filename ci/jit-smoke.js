@@ -82,5 +82,52 @@ for (let i = 0; i < 300000; i++) w = (w + inst.exports.add(i, 1) + inst.exports.
 check("wasm-add", inst.exports.add(40, 2), 42);
 check("wasm-popcnt", inst.exports.pop(0xff, 0), 8);
 
+// WebAssembly f32/f64 ceil, floor, trunc and nearest: the wasm interpreter (IPInt) implements them with roundss/
+// roundsd (SSE4.1) unless it is lowered to SSE2. Compared bit-exactly (Object.is, so -0 counts) with a JS reference.
+{
+  const ops = [
+    ["f32.ceil", 0x8d], ["f32.floor", 0x8e], ["f32.trunc", 0x8f], ["f32.nearest", 0x90],
+    ["f64.ceil", 0x9b], ["f64.floor", 0x9c], ["f64.trunc", 0x9d], ["f64.nearest", 0x9e],
+  ];
+  const str = s => [s.length, ...Array.from(s, c => c.charCodeAt(0))];
+  const sec = (id, body) => [id, body.length, ...body];
+  const F32 = 0x7d, F64 = 0x7c;
+  const types = [2, 0x60, 1, F32, 1, F32, 0x60, 1, F64, 1, F64];
+  const funcs = [ops.length, ...ops.map(([n]) => (n.startsWith("f32") ? 0 : 1))];
+  const exps = [ops.length, ...ops.flatMap(([n], i) => [...str(n), 0, i])];
+  const bodies = [ops.length, ...ops.flatMap(([, op]) => [5, 0, 0x20, 0, op, 0x0b])];
+  const bytes = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, ...sec(1, types), ...sec(3, funcs), ...sec(7, exps), ...sec(10, bodies)]);
+  const ex = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+  const nearest = x => {
+    if (!Number.isFinite(x) || Math.abs(x) >= 2 ** 52) return x;
+    const r = Math.round(x); // half up
+    const res = r - x === 0.5 && r % 2 !== 0 ? r - 1 : r;
+    return res === 0 ? (Object.is(x, -0) || x < 0 ? -0 : 0) : res;
+  };
+  const ref = { ceil: Math.ceil, floor: Math.floor, trunc: Math.trunc, nearest };
+  const values = [0, -0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.5, -3.5, 0.49999999999999994, -0.49999999999999994, 0.7, -0.7,
+    1, -1, 123456.789, -123456.789, 2 ** 52 - 0.5, -(2 ** 52 - 0.5), 2 ** 52, 2 ** 52 + 1, 2 ** 53 + 2, 2 ** 62, -(2 ** 62),
+    2 ** 63, -(2 ** 63), 2 ** 64, 1e300, -1e300, Number.MAX_VALUE, -Number.MAX_VALUE, 5e-324, -5e-324, 1e-310, -1e-310,
+    8388607.5, -8388607.5, 8388608.5, 16777215, 16777217, Infinity, -Infinity, NaN];
+  // A few calls only: the interpreter tier must run these, not just the JITs (the warm loop below tiers up).
+  const runAll = () => {
+    for (const [name] of ops) {
+      const f32 = name.startsWith("f32");
+      const want = ref[name.split(".")[1]];
+      for (const v0 of values) {
+        const v = f32 ? Math.fround(v0) : v0;
+        const got = ex[name](v);
+        const exp = f32 ? Math.fround(want(v)) : want(v);
+        if (Number.isNaN(exp) ? !Number.isNaN(got) : !Object.is(got, exp)) {
+          failures++;
+          log(`FAIL wasm ${name}(${Object.is(v, -0) ? "-0" : v}): got ${Object.is(got, -0) ? "-0" : got}, want ${Object.is(exp, -0) ? "-0" : exp}`);
+        }
+      }
+    }
+  };
+  runAll();
+  for (let i = 0; i < 2000; i++) runAll();
+}
+
 if (failures) throw new Error(`${failures} JIT smoke check(s) failed`);
 log("jit-smoke: ok");

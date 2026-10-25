@@ -18,7 +18,7 @@ Rebuilds the whole stack from upstream sources with one change of CPU floor — 
 
 | Workflow | Builds | From |
 | --- | --- | --- |
-| `1. WebKit` | JavaScriptCore + ICU (Bun's `bun-webkit-linux-amd64`) | oven-sh/WebKit at the commit the Bun release pins, its own Dockerfile and toolchain image, only `MARCH_FLAG` changed |
+| `1. WebKit` | JavaScriptCore + ICU (Bun's `bun-webkit-linux-amd64`) | oven-sh/WebKit at the commit the Bun release pins, its own Dockerfile and toolchain image, `MARCH_FLAG` changed, plus [one patch](patches/webkit): the wasm interpreter's `roundss`/`roundsd` (SSE4.1, no CPU check) lowered to SSE2 |
 | `2. Bun` | `bun` 1.4.x | oven-sh/bun + [`patches/bun`](patches/bun): the CPU floor (C/C++, Rust `target-cpu`/features), libspng's SSE4.1 filter level, the WebKit download URL, and bun's own static ISA verifier lowered to SSE2 |
 | `3. Apps` | `opencode`, `cline` | their own release build scripts, run by the legacy bun so `--compile` embeds it; Cline gets [one patch](patches/cline) that disables auto-update to the official AVX build |
 | `4. Antigravity` | — | agy is closed source (Go + C++ built for x86-64-v2): it SIGILLs on a Core 2 at its first SSE4.1 `pmulld`. The installer runs the official binary through `qemu-x86_64 -cpu max` when it detects that |
