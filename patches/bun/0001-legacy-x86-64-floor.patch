@@ -1,0 +1,103 @@
+diff --git a/scripts/build/deps/libspng.ts b/scripts/build/deps/libspng.ts
+index 5f2853f9..8d8bc1eb 100644
+--- a/scripts/build/deps/libspng.ts
++++ b/scripts/build/deps/libspng.ts
+@@ -34,7 +34,8 @@ export const libspng: Dependency = {
+     defines: {
+       SPNG_STATIC: true,
+       // 4 = SSE4.1 defilter paths (pabsw/pblendvb); our x64 floor is nehalem. No-op on arm64 (NEON is auto-detected).
+-      ...(cfg.x64 ? { SPNG_SSE: 4 } : {}),
++      // bun-legacy: 1 = SSE2 only; the legacy x64 floor has no SSSE3/SSE4.1.
++      ...(cfg.x64 ? { SPNG_SSE: 1 } : {}),
+     },
+     cflags: [`-I${depBuildDir(cfg, "zlib")}`],
+   }),
+diff --git a/scripts/build/deps/webkit.ts b/scripts/build/deps/webkit.ts
+index 4e2fd93d..a01f7a56 100644
+--- a/scripts/build/deps/webkit.ts
++++ b/scripts/build/deps/webkit.ts
+@@ -80,7 +80,10 @@ function prebuiltUrl(cfg: Config): string {
+   const name = `bun-webkit-${os}-${arch}${prebuiltSuffix(cfg)}`;
+   const version = cfg.webkitVersion;
+   const tag = version.startsWith("autobuild-") ? version : `autobuild-${version}`;
+-  return `https://github.com/oven-sh/WebKit/releases/download/${tag}/${name}.tar.gz`;
++  // bun-legacy: the WebKit release built at the legacy x86-64 floor, e.g.
++  // BUN_WEBKIT_RELEASE_BASE=https://github.com/<owner>/<repo>/releases/download
++  const base = process.env.BUN_WEBKIT_RELEASE_BASE ?? "https://github.com/oven-sh/WebKit/releases/download";
++  return `${base}/${tag}/${name}.tar.gz`;
+ }
+ 
+ /**
+@@ -108,7 +111,8 @@ function prebuiltDestDir(cfg: Config): string {
+             ? "-android"
+             : "";
+   const archKey = cfg.arm64 ? "-arm64" : "";
+-  return resolve(cfg.cacheDir, `webkit-${version16}${osKey}${archKey}${prebuiltSuffix(cfg)}`);
++  const legacyKey = process.env.BUN_WEBKIT_RELEASE_BASE ? "-legacy" : "";
++  return resolve(cfg.cacheDir, `webkit-${version16}${osKey}${archKey}${prebuiltSuffix(cfg)}${legacyKey}`);
+ }
+ 
+ // ───────────────────────────────────────────────────────────────────────────
+diff --git a/scripts/build/flags.ts b/scripts/build/flags.ts
+index 5b322de8..3b285fcf 100644
+--- a/scripts/build/flags.ts
++++ b/scripts/build/flags.ts
+@@ -71,9 +71,11 @@ export const cpuTargetFlags: Flag[] = [
+     desc: "ARM64 Windows: ARMv8-A base + CRC, generic tuning (clang-cl prefix required)",
+   },
+   {
+-    flag: "-march=nehalem",
++    // bun-legacy: generic x86-64 + CMPXCHG16B + LAHF/SAHF (the Windows 8.1+ floor). Runs on Core 2 / Pentium
++    // Dual-Core / Celeron / Athlon 64 X2 / Phenom II: no SSE3/SSSE3/SSE4.x/POPCNT is assumed anywhere.
++    flag: ["-march=x86-64", "-mcx16", "-msahf"],
+     when: c => c.x64,
+-    desc: "x64: Nehalem (2008) — no AVX, broadest compatibility",
++    desc: "x64: legacy x86-64 (SSE2 only) + cx16 + sahf — runs on pre-Nehalem CPUs",
+   },
+ ];
+ 
+diff --git a/scripts/build/rust.ts b/scripts/build/rust.ts
+index a18d3bae..7377e971 100644
+--- a/scripts/build/rust.ts
++++ b/scripts/build/rust.ts
+@@ -151,6 +151,12 @@ export const cargoBuildStdArg = "-Zbuild-std=core,alloc,std,proc_macro,panic_abo
+ function rustCpuTargetFlags(cfg: Config): string[] {
+   const rustflags: string[] = [];
+   for (const clangFlag of computeCpuTargetFlags(cfg)) {
++    // bun-legacy: single-feature x86 flags from the legacy floor (see cpuTargetFlags).
++    const feature = { "-mcx16": "cmpxchg16b", "-msahf": "lahfsahf" }[clangFlag];
++    if (feature !== undefined) {
++      rustflags.push(`-Ctarget-feature=+${feature}`);
++      continue;
++    }
+     const parsed = /^(?:\/clang:)?-m(cpu|tune|arch)=(.+)$/.exec(clangFlag);
+     assert(parsed !== null, `rustCpuTargetFlags() can't translate cpuTargetFlags entry '${clangFlag}'`);
+     const kind = parsed[1]!;
+diff --git a/scripts/verify-baseline-static/src/main.rs b/scripts/verify-baseline-static/src/main.rs
+index 9bd67118..4574a5f3 100644
+--- a/scripts/verify-baseline-static/src/main.rs
++++ b/scripts/verify-baseline-static/src/main.rs
+@@ -52,7 +52,7 @@ const NEHALEM_ALLOWED: &[CpuidFeature] = &[
+     CpuidFeature::CLFSH, // CLFLUSH
+     CpuidFeature::FXSR,  // FXSAVE/FXRSTOR
+     CpuidFeature::SYSCALL,
+-    CpuidFeature::RDTSCP, // Nehalem has this (K8 introduced it, Intel added in Nehalem)
++    // bun-legacy: RDTSCP is NOT on Core 2 / Pentium Dual-Core (Intel added it in Nehalem), so it is not allowed.
+     // LAHF/SAHF in 64-bit: iced doesn't tag these with a distinct feature
+     // (they're just INTEL8086 or X64). If it ever does, we'd add it here.
+     CpuidFeature::CMPXCHG16B, // Nehalem has it, required by x86-64-v2
+@@ -60,12 +60,8 @@ const NEHALEM_ALLOWED: &[CpuidFeature] = &[
+     CpuidFeature::MMX,
+     CpuidFeature::SSE,
+     CpuidFeature::SSE2,
+-    CpuidFeature::SSE3,
+-    CpuidFeature::MONITOR, // MONITOR/MWAIT, introduced with SSE3
+-    CpuidFeature::SSSE3,
+-    CpuidFeature::SSE4_1,
+-    CpuidFeature::SSE4_2,
+-    CpuidFeature::POPCNT,
++    // bun-legacy: the floor is SSE2. SSE3, SSSE3, SSE4.1, SSE4.2 and POPCNT are post-baseline and must be
++    // runtime-dispatched (Athlon 64 has no SSSE3, Core 2 / Pentium Dual-Core no SSE4.1/SSE4.2/POPCNT).
+     // PAUSE is architecturally a hinted NOP since P4; iced tags it separately.
+     // PREFETCHW was AMD-only for ages but Intel added it by Nehalem era (it's
+     // a NOP if the line isn't in a modifiable state anyway — safe).

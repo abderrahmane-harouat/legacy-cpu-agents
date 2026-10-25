@@ -1,0 +1,61 @@
+name: 4. Antigravity CLI on legacy CPUs
+
+# agy is closed source (google-antigravity/antigravity-cli ships binaries only), so it cannot be rebuilt. This runs
+# the official binary on emulated old CPUs, reports the exact faulting instruction, and tests the fallback the
+# installer uses: running agy through QEMU's user-mode emulator on the old machine.
+on:
+  workflow_dispatch:
+    inputs:
+      agy_version:
+        description: "Antigravity CLI release (e.g. 1.4.7)"
+        required: true
+        default: "1.4.7"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ inputs.agy_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: legacy
+      - name: Download agy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$VERSION" -R google-antigravity/antigravity-cli -p agy_cli_linux_x64.tar.gz -D "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/agy" && tar xzf "$RUNNER_TEMP/agy_cli_linux_x64.tar.gz" -C "$RUNNER_TEMP/agy"
+          ls -la "$RUNNER_TEMP/agy"; file "$RUNNER_TEMP/agy/"*
+          sudo apt-get update && sudo apt-get install -y qemu-user gdb binutils
+      - name: Static ISA report
+        run: bash legacy/ci/isascan.sh "$RUNNER_TEMP/agy/antigravity"
+      - name: Native (modern CPU) baseline
+        run: |
+          "$RUNNER_TEMP/agy/antigravity" --version || true
+          "$RUNNER_TEMP/agy/antigravity" --help | head -30 || true
+      - name: On Core 2 / Athlon 64 / SSE2 floor
+        continue-on-error: true
+        run: |
+          export HOME="$RUNNER_TEMP/home" && mkdir -p "$HOME"
+          bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/agy/antigravity" --version
+      - name: Where does it fault on a Core 2?
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          export HOME="$RUNNER_TEMP/home"
+          a="$RUNNER_TEMP/agy/antigravity"
+          qemu-x86_64 -cpu Conroe -g 1234 "$a" --version &
+          sleep 3
+          gdb -q -batch -ex 'target remote :1234' -ex 'handle SIGSEGV nostop noprint pass' -ex 'handle SIGURG nostop noprint pass' \
+            -ex 'continue' -ex 'info registers rip' -ex 'x/6i $pc' -ex 'bt 8' "$a" 2>&1 | tail -30
+          kill %1 2>/dev/null || true
+      - name: Fallback — agy through qemu-x86_64 -cpu max (what the installer sets up)
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          time qemu-x86_64 -cpu max "$RUNNER_TEMP/agy/antigravity" --version
+          time qemu-x86_64 -cpu max "$RUNNER_TEMP/agy/antigravity" --help | head -20

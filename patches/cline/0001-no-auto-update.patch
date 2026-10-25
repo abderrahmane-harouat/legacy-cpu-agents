@@ -1,0 +1,13 @@
+diff --git a/apps/cli/src/commands/update.ts b/apps/cli/src/commands/update.ts
+index b7f415c..a287d34 100644
+--- a/apps/cli/src/commands/update.ts
++++ b/apps/cli/src/commands/update.ts
+@@ -310,6 +310,8 @@ const CLIENT_COUNT_EXIT_TIMEOUT_MS = 3_000;
+ export function autoUpdateOnStartup(): void {
+ 	if (process.env.IS_DEV === "true") return;
+ 	if (process.env.CLINE_NO_AUTO_UPDATE === "1") return;
++	// legacy-cpu build: the official binaries need SSE4.2/AVX2, so never swap this one out on its own.
++	if (process.env.CLINE_LEGACY_ALLOW_AUTO_UPDATE !== "1") return;
+ 	if (!isAutoUpdateEnabledGlobally()) return;
+ 
+ 	const { packageName, packageManager, updateCommand } =

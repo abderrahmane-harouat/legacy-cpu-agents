@@ -1,0 +1,206 @@
+name: 3. opencode + Cline for legacy CPUs
+
+# Builds opencode and the Cline CLI from source with their own release scripts, but running on the legacy Bun from
+# workflow 2: `bun build --compile` embeds the bun that runs it, so the apps inherit its CPU floor. Each binary is
+# checked to embed exactly that runtime, then exercised (CLI, server, full TUI) on emulated old CPUs.
+on:
+  workflow_dispatch:
+    inputs:
+      bun_version:
+        description: "Legacy Bun release to build with (bun-v<version>-legacy)"
+        required: true
+        default: "1.4.4"
+      opencode_version:
+        description: "opencode release (anomalyco/opencode tag v<version>); empty to skip"
+        default: "1.19.4"
+      cline_version:
+        description: "Cline CLI release (cline/cline tag cli-v<version>); empty to skip"
+        default: "3.0.73"
+
+permissions:
+  contents: write
+
+env:
+  BUN_VERSION: ${{ inputs.bun_version }}
+
+jobs:
+  opencode:
+    if: inputs.opencode_version != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ inputs.opencode_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: legacy
+      - &setup-bun
+        name: Install the legacy bun
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "bun-v$BUN_VERSION-legacy" -R "$GITHUB_REPOSITORY" -p bun-linux-x64-legacy.zip -D "$RUNNER_TEMP"
+          unzip -q -o "$RUNNER_TEMP/bun-linux-x64-legacy.zip" -d "$RUNNER_TEMP"
+          mkdir -p "$HOME/.bun/bin"
+          install -m755 "$RUNNER_TEMP/bun-linux-x64-legacy/bun" "$HOME/.bun/bin/bun"
+          ln -sf bun "$HOME/.bun/bin/bunx"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          # Belt and braces: if any compile ever picks a non-host target, it still gets the legacy runtime.
+          echo "BUN_COMPILE_TARGET_TARBALL_URL=https://github.com/$GITHUB_REPOSITORY/releases/download/bun-v$BUN_VERSION-legacy/bun-linux-x64-legacy.tgz" >> "$GITHUB_ENV"
+          "$HOME/.bun/bin/bun" --version
+          sudo apt-get update && sudo apt-get install -y qemu-user binutils
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/checkout@v4
+        with:
+          repository: anomalyco/opencode
+          ref: v${{ inputs.opencode_version }}
+          path: opencode
+      - name: Apply patches
+        run: |
+          shopt -s nullglob
+          for p in legacy/patches/opencode/*.patch; do git -C opencode apply --verbose "$GITHUB_WORKSPACE/$p"; done
+      - name: bun install
+        working-directory: opencode
+        run: |
+          python3 -m pip install setuptools >/dev/null 2>&1 || true
+          bun install
+      - name: Build (packages/opencode/script/build.ts --single)
+        working-directory: opencode
+        env:
+          OPENCODE_VERSION: ${{ inputs.opencode_version }}
+          OPENCODE_CHANNEL: latest
+        run: ./packages/opencode/script/build.ts --single
+      - name: Check the embedded runtime is the legacy bun
+        run: bash legacy/ci/same-runtime.sh "$HOME/.bun/bin/bun" opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode
+      - name: opencode on Core 2 / Athlon 64 / SSE2 floor
+        run: |
+          set -euo pipefail
+          oc="$GITHUB_WORKSPACE/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode"
+          export OPENCODE_DISABLE_AUTOUPDATE=1 HOME="$RUNNER_TEMP/home" && mkdir -p "$HOME"
+          cd "$GITHUB_WORKSPACE/opencode"
+          o=$GITHUB_WORKSPACE/legacy/ci/old-cpus.sh
+          bash $o "$oc" --version
+          bash $o "$oc" models
+          bash $o "$oc" debug info
+          bash $o "$oc" debug config
+          bash $o "$oc" debug paths
+          bash $o "$oc" debug file search package.json
+          bash $o "$oc" debug rg search --limit 3 OPENCODE_VERSION
+      - name: opencode server (HTTP API) on a Core 2
+        run: |
+          set -uo pipefail
+          oc="$GITHUB_WORKSPACE/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode"
+          export OPENCODE_DISABLE_AUTOUPDATE=1 HOME="$RUNNER_TEMP/home"
+          cd "$GITHUB_WORKSPACE/opencode"
+          qemu-x86_64 -cpu Conroe "$oc" serve --port 4199 --hostname 127.0.0.1 > "$RUNNER_TEMP/serve.log" 2>&1 &
+          pid=$!
+          ok=0
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:4199/config >/dev/null 2>&1; then ok=1; break; fi
+            kill -0 $pid 2>/dev/null || break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:4199/config | head -c 400; echo
+          curl -fsS http://127.0.0.1:4199/session | head -c 400; echo
+          kill $pid 2>/dev/null; wait $pid 2>/dev/null
+          cat "$RUNNER_TEMP/serve.log" | tail -30
+          ! grep -qE 'Illegal instruction|SIGILL' "$RUNNER_TEMP/serve.log" && [ $ok = 1 ]
+      - name: opencode TUI on Core 2 / Athlon 64 / SSE2 floor
+        run: |
+          set -euo pipefail
+          oc="$GITHUB_WORKSPACE/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode"
+          export OPENCODE_DISABLE_AUTOUPDATE=1 HOME="$RUNNER_TEMP/home"
+          cd "$GITHUB_WORKSPACE/opencode"
+          for cpu in Conroe Opteron_G2 floor; do bash "$GITHUB_WORKSPACE/legacy/ci/tui-probe.sh" $cpu 150 "$oc"; done
+      - name: Package
+        run: |
+          set -euo pipefail
+          d=opencode/packages/opencode/dist/opencode-linux-x64
+          tar -czf "$RUNNER_TEMP/opencode-linux-x64-legacy.tar.gz" -C "$d/bin" opencode
+          (cd "$RUNNER_TEMP" && sha256sum opencode-linux-x64-legacy.tar.gz > opencode-SHA256SUMS && cat opencode-SHA256SUMS)
+      - name: Publish release opencode-v${{ inputs.opencode_version }}-legacy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="opencode-v$VERSION-legacy"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "opencode $VERSION for legacy x86-64 CPUs" \
+              --notes "opencode $VERSION (anomalyco/opencode@v$VERSION, unmodified) compiled with the legacy Bun $BUN_VERSION, so it runs on Core 2 / Pentium Dual-Core / Athlon 64 class CPUs. Tested under QEMU (Conroe, Opteron_G2, SSE2 floor): CLI, server and TUI. Don't run \`opencode upgrade\`: it would install the official build, which needs SSE4.2/AVX2."
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/opencode-linux-x64-legacy.tar.gz" "$RUNNER_TEMP/opencode-SHA256SUMS"
+
+  cline:
+    if: inputs.cline_version != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ inputs.cline_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: legacy
+      - *setup-bun
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/checkout@v4
+        with:
+          repository: cline/cline
+          ref: cli-v${{ inputs.cline_version }}
+          path: cline
+      - name: Apply patches (no auto-update to the official AVX build)
+        run: for p in legacy/patches/cline/*.patch; do git -C cline apply --verbose "$GITHUB_WORKSPACE/$p"; done
+      - name: bun install
+        working-directory: cline
+        run: bun install
+      - name: Build (apps/cli/script/build.ts --single)
+        working-directory: cline/apps/cli
+        run: bun script/build.ts --single
+      - name: Check the embedded runtime is the legacy bun
+        run: bash legacy/ci/same-runtime.sh "$HOME/.bun/bin/bun" cline/apps/cli/dist/cli-linux-x64/bin/cline
+      - name: Cline on Core 2 / Athlon 64 / SSE2 floor
+        run: |
+          set -euo pipefail
+          c="$GITHUB_WORKSPACE/cline/apps/cli/dist/cli-linux-x64/bin/cline"
+          export HOME="$RUNNER_TEMP/home" CLINE_NO_AUTO_UPDATE=1 && mkdir -p "$HOME"
+          o=$GITHUB_WORKSPACE/legacy/ci/old-cpus.sh
+          bash $o "$c" --version
+          bash $o "$c" --help
+      - name: Cline hub daemon on a Core 2
+        run: |
+          set -uo pipefail
+          c="$GITHUB_WORKSPACE/cline/apps/cli/dist/cli-linux-x64/bin/cline"
+          export HOME="$RUNNER_TEMP/home" CLINE_NO_AUTO_UPDATE=1 CLINE_HUB_PORT=4321
+          export CLINE_DIR="$HOME/.cline" CLINE_DATA_DIR="$HOME/data" CLINE_HUB_DISCOVERY_PATH="$HOME/hub.json"
+          # The CLI side runs emulated; the daemon it forks runs natively (qemu-user does not follow exec), the TUI
+          # step below covers the emulated in-process paths.
+          qemu-x86_64 -cpu Conroe "$c" hub start; rc1=$?
+          sleep 20
+          qemu-x86_64 -cpu Conroe "$c" hub status | tee "$RUNNER_TEMP/hub.json"; rc2=$?
+          qemu-x86_64 -cpu Conroe "$c" hub stop
+          [ $rc1 = 0 ] && [ $rc2 = 0 ] && grep -q '"running": *true' "$RUNNER_TEMP/hub.json"
+      - name: Cline TUI on Core 2 / Athlon 64 / SSE2 floor
+        run: |
+          set -euo pipefail
+          c="$GITHUB_WORKSPACE/cline/apps/cli/dist/cli-linux-x64/bin/cline"
+          export HOME="$RUNNER_TEMP/home" CLINE_NO_AUTO_UPDATE=1
+          mkdir -p "$RUNNER_TEMP/proj" && cd "$RUNNER_TEMP/proj"
+          for cpu in Conroe Opteron_G2 floor; do bash "$GITHUB_WORKSPACE/legacy/ci/tui-probe.sh" $cpu 150 "$c"; done
+      - name: Package
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/cline-linux-x64-legacy.tar.gz" -C cline/apps/cli/dist cli-linux-x64
+          (cd "$RUNNER_TEMP" && sha256sum cline-linux-x64-legacy.tar.gz > cline-SHA256SUMS && cat cline-SHA256SUMS)
+      - name: Publish release cline-v${{ inputs.cline_version }}-legacy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="cline-v$VERSION-legacy"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "Cline CLI $VERSION for legacy x86-64 CPUs" \
+              --notes "Cline CLI $VERSION (cline/cline@cli-v$VERSION) compiled with the legacy Bun $BUN_VERSION, so it runs on Core 2 / Pentium Dual-Core / Athlon 64 class CPUs. One patch: auto-update is off (the official build needs SSE4.2/AVX2). Tested under QEMU (Conroe, Opteron_G2, SSE2 floor): CLI, hub daemon and TUI."
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/cline-linux-x64-legacy.tar.gz" "$RUNNER_TEMP/cline-SHA256SUMS"

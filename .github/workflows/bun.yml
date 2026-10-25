@@ -1,0 +1,137 @@
+name: 2. Bun for legacy CPUs
+
+# Builds oven-sh/bun at a release tag with patches/bun applied (x64 floor -march=x86-64 -mcx16 -msahf instead of
+# -march=nehalem), against the legacy WebKit from workflow 1, inside the same ubuntu 20.04 toolchain image WebKit uses
+# (glibc 2.31). Then proves it on emulated old CPUs and publishes `bun-v<version>-legacy`.
+on:
+  workflow_dispatch:
+    inputs:
+      bun_version:
+        description: "Bun release to build (e.g. 1.4.4)"
+        required: true
+        default: "1.4.4"
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ inputs.bun_version }}
+
+jobs:
+  bun:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: legacy
+      - name: Free disk space
+        run: bash legacy/ci/free-disk.sh
+      - uses: actions/checkout@v4
+        with:
+          repository: oven-sh/bun
+          ref: bun-v${{ inputs.bun_version }}
+          path: bun
+      - name: Apply legacy-CPU patches
+        run: |
+          set -euo pipefail
+          for p in legacy/patches/bun/*.patch; do echo "applying $p"; git -C bun apply --verbose "$GITHUB_WORKSPACE/$p"; done
+          git -C bun diff --stat
+      - name: Find the legacy WebKit release
+        id: webkit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha=$(sed -n 's/^export const WEBKIT_VERSION = "\([0-9a-f]*\)";/\1/p' bun/scripts/build/deps/webkit.ts)
+          gh release download "autobuild-$sha" -R "$GITHUB_REPOSITORY" -p toolchain-image.txt -D "$RUNNER_TEMP" || {
+            echo "::error::No legacy WebKit release autobuild-$sha. Run workflow '1. WebKit' for Bun $VERSION first."; exit 1; }
+          echo "image=$(cat "$RUNNER_TEMP/toolchain-image.txt")" >> "$GITHUB_OUTPUT"
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: bun-ccache-${{ inputs.bun_version }}-${{ github.run_id }}
+          restore-keys: |
+            bun-ccache-${{ inputs.bun_version }}-
+            bun-ccache-
+      - name: Build bun (release, legacy x86-64 floor)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ccache"
+          docker run --rm -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP/ccache:/ccache" \
+            -e BUN_SRC="$GITHUB_WORKSPACE/bun" -e BUN_BOOTSTRAP_VERSION="$VERSION" -e CCACHE_DIR=/ccache \
+            -e BUN_WEBKIT_RELEASE_BASE="https://github.com/$GITHUB_REPOSITORY/releases/download" \
+            -e CI=true -e GITHUB_ACTIONS=true \
+            "${{ steps.webkit.outputs.image }}" bash "$GITHUB_WORKSPACE/legacy/ci/build-bun.sh"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/bun/build" "$RUNNER_TEMP/ccache"
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: bun-ccache-${{ inputs.bun_version }}-${{ github.run_id }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/dist"; mkdir -p "$out/bun-linux-x64-legacy" "$out/bun-linux-x64-legacy-profile" "$out/npm/package/bin"
+          cp bun/build/release/bun "$out/bun-linux-x64-legacy/bun"
+          cp bun/build/release/bun-profile "$out/bun-linux-x64-legacy-profile/bun-profile"
+          (cd "$out" && zip -qr bun-linux-x64-legacy.zip bun-linux-x64-legacy && zip -qr bun-linux-x64-legacy-profile.zip bun-linux-x64-legacy-profile)
+          # The npm layout `bun build --compile` downloads (BUN_COMPILE_TARGET_TARBALL_URL).
+          cp bun/build/release/bun "$out/npm/package/bin/bun"
+          echo "{\"name\":\"@legacy/bun-linux-x64\",\"version\":\"$VERSION\",\"os\":[\"linux\"],\"cpu\":[\"x64\"]}" > "$out/npm/package/package.json"
+          tar -czf "$out/bun-linux-x64-legacy.tgz" -C "$out/npm" package
+          (cd "$out" && sha256sum *.zip *.tgz > SHA256SUMS && cat SHA256SUMS)
+      - name: Install QEMU user-mode
+        run: sudo apt-get update && sudo apt-get install -y qemu-user binutils
+      - name: Static ISA report
+        run: bash legacy/ci/isascan.sh bun/build/release/bun-profile
+      - name: Static verifier (bun's own, floor lowered to SSE2)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cargo build --release -q --manifest-path bun/scripts/verify-baseline-static/Cargo.toml
+          bun/scripts/verify-baseline-static/target/release/verify-baseline-static \
+            --binary bun/build/release/bun-profile \
+            --allowlist bun/scripts/verify-baseline-static/allowlist-x64.txt > "$RUNNER_TEMP/verify-baseline-static.txt" 2>&1
+          rc=$?
+          tail -150 "$RUNNER_TEMP/verify-baseline-static.txt"
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bun-${{ inputs.bun_version }}-legacy-reports
+          path: ${{ runner.temp }}/verify-baseline-static.txt
+          if-no-files-found: ignore
+      - name: Control — official bun must SIGILL on a Core 2
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/official.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$VERSION/bun-linux-x64-baseline.zip"
+          unzip -q -o "$RUNNER_TEMP/official.zip" -d "$RUNNER_TEMP/official"
+          CPUS=Conroe bash legacy/ci/old-cpus.sh --expect-sigill "$RUNNER_TEMP"/official/bun-linux-x64-baseline/bun -e 'console.log(1)'
+      - name: Legacy bun on Core 2 / Athlon 64 / SSE2 floor
+        run: |
+          set -euo pipefail
+          b="$RUNNER_TEMP/dist/bun-linux-x64-legacy/bun"
+          bash legacy/ci/old-cpus.sh "$b" --version
+          bash legacy/ci/old-cpus.sh "$b" -e 'console.log(process.versions.bun, Bun.revision)'
+          bash legacy/ci/old-cpus.sh "$b" legacy/ci/bun-smoke.ts
+      - name: Publish release bun-v${{ inputs.bun_version }}-legacy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="bun-v$VERSION-legacy"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "Bun $VERSION for legacy x86-64 CPUs" --notes-file - <<EOF
+          Bun $VERSION built for CPUs without SSE4.2/POPCNT/AVX: Core 2, Pentium Dual-Core, Celeron, Athlon 64 X2, Phenom II, ...
+          (\`-march=x86-64 -mcx16 -msahf\` across Bun, its Rust code, its C/C++ dependencies and JavaScriptCore; glibc 2.17+.)
+
+          - \`bun-linux-x64-legacy.zip\` — the \`bun\` binary
+          - \`bun-linux-x64-legacy-profile.zip\` — with symbols
+          - \`bun-linux-x64-legacy.tgz\` — npm layout, for \`BUN_COMPILE_TARGET_TARBALL_URL\` (\`bun build --compile\`)
+
+          Tested under QEMU as Core 2 (Conroe), Athlon 64 X2 (Opteron_G2) and a bare SSE2 floor.
+          EOF
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP"/dist/*.zip "$RUNNER_TEMP"/dist/*.tgz "$RUNNER_TEMP"/dist/SHA256SUMS

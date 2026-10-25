@@ -1,0 +1,97 @@
+name: 1. WebKit (JavaScriptCore) for legacy CPUs
+
+# Builds oven-sh/WebKit at the commit a Bun release pins (WEBKIT_VERSION in bun's scripts/build/deps/webkit.ts) at the
+# legacy x86-64 floor, tests the jsc shell on emulated Core 2 / Athlon 64 CPUs, and publishes it as the release
+# `autobuild-<sha>` with the asset name Bun's build downloads (bun-webkit-linux-amd64.tar.gz).
+on:
+  workflow_dispatch:
+    inputs:
+      bun_version:
+        description: "Bun release whose pinned WebKit to build (e.g. 1.4.4)"
+        required: true
+        default: "1.4.4"
+
+permissions:
+  contents: write
+
+jobs:
+  webkit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: legacy
+      - name: Free disk space
+        run: bash legacy/ci/free-disk.sh
+      - name: Resolve the WebKit commit
+        id: sha
+        run: |
+          sha=$(curl -fsSL "https://raw.githubusercontent.com/oven-sh/bun/bun-v${{ inputs.bun_version }}/scripts/build/deps/webkit.ts" \
+            | sed -n 's/^export const WEBKIT_VERSION = "\([0-9a-f]*\)";/\1/p')
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "WebKit $sha for Bun ${{ inputs.bun_version }}"
+      - uses: actions/checkout@v4
+        with:
+          repository: oven-sh/WebKit
+          ref: ${{ steps.sha.outputs.sha }}
+          path: webkit
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !LayoutTests/
+            !JSTests/
+            !PerformanceTests/
+            !Websites/
+            !ManualTests/
+            !WebDriverTests/
+      - uses: docker/setup-buildx-action@v3
+      - name: Build JavaScriptCore + ICU (-march=x86-64 -mcx16 -msahf)
+        id: build
+        run: bash legacy/ci/build-webkit.sh webkit "$RUNNER_TEMP/bun-webkit"
+      - name: Package like oven-sh/WebKit's release
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          echo "#define BUN_WEBKIT_VERSION \"$SHA\"" >> bun-webkit/include/cmakeconfig.h
+          echo "{ \"name\": \"bun-webkit-linux-amd64\", \"version\": \"0.0.1-$SHA\", \"os\": [\"linux\"], \"cpu\": [\"x64\"], \"repository\": \"https://github.com/$GITHUB_REPOSITORY\" }" > bun-webkit/package.json
+          rm -rf bun-webkit/lib/*.so bun-webkit/lib/*.so.*
+          tar -czf bun-webkit-linux-amd64.tar.gz bun-webkit
+          echo "${{ steps.build.outputs.image }}" > toolchain-image.txt
+          ls -la bun-webkit-linux-amd64.tar.gz bun-webkit/bin
+      - name: Install QEMU user-mode
+        run: sudo apt-get update && sudo apt-get install -y qemu-user binutils
+      - name: Static ISA report (libJavaScriptCore.a, jsc)
+        run: |
+          for f in "$RUNNER_TEMP"/bun-webkit/bin/jsc "$RUNNER_TEMP"/bun-webkit/lib/libJavaScriptCore.a; do
+            echo "== $f"; bash legacy/ci/isascan.sh "$f"
+          done
+      - name: Control — oven-sh's Nehalem jsc must SIGILL on old CPUs
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/upstream" && cd "$RUNNER_TEMP/upstream"
+          curl -fsSL "https://github.com/oven-sh/WebKit/releases/download/autobuild-$SHA/bun-webkit-linux-amd64.tar.gz" | tar xz bun-webkit/bin/jsc
+          CPUS="Conroe" bash "$GITHUB_WORKSPACE/legacy/ci/old-cpus.sh" --expect-sigill ./bun-webkit/bin/jsc "$GITHUB_WORKSPACE/legacy/ci/jit-smoke.js"
+      - name: jsc on Core 2 / Athlon 64 / SSE2 floor
+        run: bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/bun-webkit/bin/jsc" legacy/ci/jit-smoke.js
+      - name: jsc with the JIT tiers forced (DFG/FTL early)
+        run: |
+          bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/bun-webkit/bin/jsc" --thresholdForJITAfterWarmUp=10 \
+            --thresholdForOptimizeAfterWarmUp=20 --thresholdForFTLOptimizeAfterWarmUp=50 legacy/ci/jit-smoke.js
+      - name: Publish release autobuild-${{ steps.sha.outputs.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          tag="autobuild-$SHA"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "WebKit $SHA (legacy x86-64)" \
+              --notes "oven-sh/WebKit@$SHA (the WebKit of Bun ${{ inputs.bun_version }}) built with \`-march=x86-64 -mcx16 -msahf\` instead of \`-march=nehalem\`. Consumed by the Bun workflow."
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber \
+            "$RUNNER_TEMP/bun-webkit-linux-amd64.tar.gz" "$RUNNER_TEMP/toolchain-image.txt"

@@ -1,0 +1,51 @@
+# legacy-cpu-agents
+
+AI coding agents — **opencode**, **Cline CLI**, **Antigravity CLI** — on old x86-64 PCs: Core 2 Duo/Quad, Pentium
+Dual-Core, Celeron, Athlon 64 X2, Phenom II and anything else without SSE4.2/POPCNT/AVX.
+
+## Why the official builds crash (`Illegal instruction (core dumped)`)
+
+opencode and Cline are `bun build --compile` executables: the Bun runtime is inside them. Bun 1.4's only x64 build
+is its "baseline", compiled with `-march=nehalem` (2008): SSE4.1, SSE4.2 and POPCNT are assumed everywhere, in Bun's
+Rust and C++ code, its dependencies and JavaScriptCore. A Pentium Dual-Core / Core 2 has SSSE3 at most, so the very
+first such instruction kills the process. (opencode's `-baseline` npm package even ships the same binary as the
+regular one, AVX2 included.)
+
+## What this repo does
+
+Rebuilds the whole stack from upstream sources with one change of CPU floor — `-march=x86-64 -mcx16 -msahf`
+(SSE2 + CMPXCHG16B + LAHF/SAHF, the Windows 10 floor) — and nothing assumed above it:
+
+| Workflow | Builds | From |
+| --- | --- | --- |
+| `1. WebKit` | JavaScriptCore + ICU (Bun's `bun-webkit-linux-amd64`) | oven-sh/WebKit at the commit the Bun release pins, its own Dockerfile and toolchain image, only `MARCH_FLAG` changed |
+| `2. Bun` | `bun` 1.4.x | oven-sh/bun + [`patches/bun`](patches/bun): the CPU floor (C/C++, Rust `target-cpu`/features), libspng's SSE4.1 filter level, the WebKit download URL, and bun's own static ISA verifier lowered to SSE2 |
+| `3. Apps` | `opencode`, `cline` | their own release build scripts, run by the legacy bun so `--compile` embeds it; Cline gets [one patch](patches/cline) that disables auto-update to the official AVX build |
+| `4. Antigravity` | — | agy is closed source; probes it on old CPUs and tests the QEMU fallback |
+
+JavaScriptCore's JIT already picks SSE4.1/POPCNT/AVX at run time from CPUID, and SIMD-heavy libraries (simdutf,
+highway, BoringSSL, zlib-ng, zstd, libjpeg-turbo) dispatch at run time too, so lowering the compile-time floor is
+enough: nothing is slower on a modern CPU except code the compiler would have auto-vectorized.
+
+### How it is verified
+
+Every binary is run under QEMU user-mode emulation of **Conroe** (Core 2 / Pentium Dual-Core), **Opteron_G2**
+(Athlon 64 X2) and a bare **SSE2 floor** model; QEMU raises SIGILL for any instruction the model lacks, as real
+hardware does. A control run of the official binary on the same model must SIGILL, proving the check bites.
+
+- `ci/jit-smoke.js` drives JSC through LLInt → Baseline → DFG → FTL on rounding/clz/typed-array/string/BigInt/wasm
+  code, plus Intl (ICU).
+- `ci/bun-smoke.ts` covers BoringSSL (AES-GCM, RSA, ECDH, Ed25519, TLS fetch), simdutf, highway JSON, hashing,
+  argon2/bcrypt, zlib/brotli/zstd, sqlite+FTS5, the bundler and CSS parser, Bun.Image codecs, the shell, workers,
+  Bun.serve/WebSocket.
+- `ci/same-runtime.sh` proves each app embeds the legacy runtime byte-for-byte (`.text`).
+- opencode: CLI commands, `serve` HTTP API, and the full TUI in a pseudo-terminal; Cline: CLI, hub, full TUI.
+
+## Install on the old PC
+
+See [`install.sh`](install.sh) (Debian/Ubuntu/Mint x86_64, glibc 2.17+).
+
+## Rebuilding for a new upstream release
+
+Run the workflows in order from the Actions tab with the new versions: `1. WebKit` (Bun version) →
+`2. Bun` (Bun version) → `3. Apps` (Bun, opencode and Cline versions).
