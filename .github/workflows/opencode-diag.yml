@@ -54,7 +54,7 @@ jobs:
         run: ./packages/opencode/script/build.ts --single
       - name: serve, native then emulated
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           oc="$GITHUB_WORKSPACE/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode"
           export OPENCODE_DISABLE_AUTOUPDATE=1
           cd "$GITHUB_WORKSPACE/opencode"
