@@ -21,7 +21,7 @@ Rebuilds the whole stack from upstream sources with one change of CPU floor — 
 | `1. WebKit` | JavaScriptCore + ICU (Bun's `bun-webkit-linux-amd64`) | oven-sh/WebKit at the commit the Bun release pins, its own Dockerfile and toolchain image, only `MARCH_FLAG` changed |
 | `2. Bun` | `bun` 1.4.x | oven-sh/bun + [`patches/bun`](patches/bun): the CPU floor (C/C++, Rust `target-cpu`/features), libspng's SSE4.1 filter level, the WebKit download URL, and bun's own static ISA verifier lowered to SSE2 |
 | `3. Apps` | `opencode`, `cline` | their own release build scripts, run by the legacy bun so `--compile` embeds it; Cline gets [one patch](patches/cline) that disables auto-update to the official AVX build |
-| `4. Antigravity` | — | agy is closed source; probes it on old CPUs and tests the QEMU fallback |
+| `4. Antigravity` | — | agy is closed source (Go + C++ built for x86-64-v2): it SIGILLs on a Core 2 at its first SSE4.1 `pmulld`. The installer runs the official binary through `qemu-x86_64 -cpu max` when it detects that |
 
 JavaScriptCore's JIT already picks SSE4.1/POPCNT/AVX at run time from CPUID, and SIMD-heavy libraries (simdutf,
 highway, BoringSSL, zlib-ng, zstd, libjpeg-turbo) dispatch at run time too, so lowering the compile-time floor is
@@ -43,7 +43,15 @@ hardware does. A control run of the official binary on the same model must SIGIL
 
 ## Install on the old PC
 
-See [`install.sh`](install.sh) (Debian/Ubuntu/Mint x86_64, glibc 2.17+).
+```sh
+curl -fsSL https://raw.githubusercontent.com/abderrahmane-harouat/legacy-cpu-agents/main/install.sh | bash
+# or only some:  ... | bash -s -- opencode cline
+```
+
+Installs `bun`, `opencode`, `cline` and `agy` into `~/.local/bin` (Debian/Ubuntu/Mint x86_64, glibc 2.17+).
+Remove the official npm builds first if you installed them (`npm uninstall -g opencode-ai cline`), and don't run
+`opencode upgrade` — it would fetch the official build again. Antigravity under QEMU is slower than native
+(everything is emulated); it self-updates in place and keeps working through the wrapper.
 
 ## Rebuilding for a new upstream release
 
