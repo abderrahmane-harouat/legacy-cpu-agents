@@ -48,32 +48,32 @@ jobs:
         run: bun install
       - working-directory: cline/apps/cli
         run: bun script/build.ts --single
-      - name: TUI under strace, in its own PID namespace
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user strace >/dev/null
+      - name: Same steps as the apps job, on the bare runner, with live signal and memory tracing
         run: |
-          set -uo pipefail
-          mkdir -p "$RUNNER_TEMP/out"
-          for mode in Conroe; do
-            docker run --rm --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
-              -v "$GITHUB_WORKSPACE/cline/apps/cli/dist/cli-linux-x64:/cline:ro" -v "$RUNNER_TEMP/out:/out" \
-              -e MODE=$mode -e TERM=xterm-256color ubuntu:24.04 bash -c '
-                set -u
-                apt-get update -qq >/dev/null && apt-get install -y -qq strace qemu-user procps >/dev/null
-                useradd -m u && mkdir -p /home/u/proj && chown -R u /home/u
-                run=/cline/bin/cline; [ "$MODE" = native ] || run="qemu-x86_64 -cpu $MODE /cline/bin/cline"
-                # -I3: strace blocks fatal signals, so it survives a kill(-1) and records it.
-                su u -c "cd ~/proj && CLINE_NO_AUTO_UPDATE=1 timeout -k 10 120 script -qefc \"stty cols 120 rows 40; exec strace -I3 -f -tt -o /out/strace-$MODE.txt -e trace=kill,tkill,tgkill,pidfd_send_signal,rt_sigqueueinfo,execve,setsid,setpgid $run\" /dev/null </dev/zero >/out/tty-$MODE.txt 2>&1"
-                echo "[$MODE] exit $?"
-                ps -eo pid,ppid,pgid,sid,user,stat,args
-              '
-            echo "=== $mode: signals sent (kill/tgkill/...) ==="
-            grep -E 'kill\(|tgkill\(|pidfd_send_signal\(|rt_sigqueueinfo\(' "$RUNNER_TEMP/out/strace-$mode.txt" | grep -v 'SIG_0\|, 0)' | head -60
-            echo "=== $mode: execve / setsid ==="
-            grep -E 'execve\(|setsid\(|setpgid\(' "$RUNNER_TEMP/out/strace-$mode.txt" | cut -c1-300 | head -40
-            echo "=== $mode: last screen ==="
-            tr -d '\033' < "$RUNNER_TEMP/out/tty-$mode.txt" | sed 's/\[[0-9;?]*[a-zA-Z]//g' | tr -s ' \n' | tail -c 1200; echo
-          done
+          set +e -uo pipefail
+          c="$GITHUB_WORKSPACE/cline/apps/cli/dist/cli-linux-x64/bin/cline"
+          export HOME="$RUNNER_TEMP/home" CLINE_NO_AUTO_UPDATE=1 && mkdir -p "$HOME"
+          ( while sleep 10; do echo "[mem $(date +%T)] $(free -m | awk '/Mem:/{print "used="$3"M avail="$7"M"} /Swap:/{print "swap="$3"M"}' | xargs) top: $(ps -eo rss,comm --sort=-rss | sed -n 2,4p | awk '{printf "%s=%dM ", $2, $1/1024}')"; done ) &
+          mon=$!
+          bash legacy/ci/old-cpus.sh "$c" --version >/dev/null; bash legacy/ci/old-cpus.sh "$c" --help >/dev/null
+          ( export CLINE_HUB_PORT=4321 CLINE_DIR="$HOME/.cline" CLINE_DATA_DIR="$HOME/data" CLINE_HUB_DISCOVERY_PATH="$HOME/hub.json"
+            setsid --wait qemu-x86_64 -cpu Conroe "$c" hub start; sleep 20
+            setsid --wait qemu-x86_64 -cpu Conroe "$c" hub status; setsid --wait qemu-x86_64 -cpu Conroe "$c" hub stop )
+          echo "--- processes before the TUI ---"; ps -eo pid,ppid,pgid,sid,user,args | grep -vE '\[|ps -eo' | cut -c1-200
+          mkdir -p "$RUNNER_TEMP/proj" && cd "$RUNNER_TEMP/proj"
+          echo "runner processes: $(pgrep -f 'Runner.(Listener|Worker)' | xargs)"
+          # Every signal the TUI (and anything it starts) sends, printed as it happens. -I3 so strace survives.
+          TERM=xterm-256color setsid --wait timeout -k 20 150 script -qefc \
+            "stty cols 120 rows 40; exec strace -I3 -f -tt -e trace=kill,tkill,tgkill,pidfd_send_signal,rt_sigqueueinfo,execve -e signal=none -o $RUNNER_TEMP/trace.txt qemu-x86_64 -cpu Conroe $c" /dev/null \
+            </dev/zero >"$RUNNER_TEMP/tty.txt" 2>&1 &
+          tp=$!
+          tail -F "$RUNNER_TEMP/trace.txt" 2>/dev/null | grep --line-buffered -vE 'SIGPWR|, 0\) ' | cut -c1-260 &
+          wait $tp; echo "TUI probe exit $?"
+          sleep 2; kill $mon
+          tr -d '\033' < "$RUNNER_TEMP/tty.txt" | sed 's/\[[0-9;?]*[a-zA-Z]//g' | tr -s ' \n' | tail -c 800; echo
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: cline-strace
-          path: ${{ runner.temp }}/out
+          path: ${{ runner.temp }}/*.txt
