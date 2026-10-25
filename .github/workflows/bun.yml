@@ -62,7 +62,6 @@ jobs:
           docker run --rm -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP/ccache:/ccache" \
             -e BUN_SRC="$GITHUB_WORKSPACE/bun" -e BUN_BOOTSTRAP_VERSION="$VERSION" -e CCACHE_DIR=/ccache \
             -e BUN_WEBKIT_RELEASE_BASE="https://github.com/$GITHUB_REPOSITORY/releases/download" \
-            -e CI=true -e GITHUB_ACTIONS=true \
             "${{ steps.webkit.outputs.image }}" bash "$GITHUB_WORKSPACE/legacy/ci/build-bun.sh"
           sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/bun/build" "$RUNNER_TEMP/ccache"
       - name: Save ccache
