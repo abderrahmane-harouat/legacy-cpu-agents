@@ -1,0 +1,79 @@
+name: "diag: Cline TUI signals"
+
+# The Cline TUI probe took the whole runner down with SIGTERM ("runner has received a shutdown signal") while qemu
+# and timeout survived: the pattern of kill(-1, SIGTERM) from the emulated process. This runs the TUI inside its own
+# PID namespace under strace, natively and emulated, and prints every signal it sends.
+on:
+  workflow_dispatch:
+    inputs:
+      bun_version:
+        default: "1.4.4"
+      cline_version:
+        default: "3.0.73"
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: ${{ inputs.bun_version }}
+
+jobs:
+  cline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: legacy
+      - name: Install the legacy bun
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "bun-v$BUN_VERSION-legacy" -R "$GITHUB_REPOSITORY" -p bun-linux-x64-legacy.zip -D "$RUNNER_TEMP"
+          unzip -q -o "$RUNNER_TEMP/bun-linux-x64-legacy.zip" -d "$RUNNER_TEMP"
+          mkdir -p "$HOME/.bun/bin"
+          install -m755 "$RUNNER_TEMP/bun-linux-x64-legacy/bun" "$HOME/.bun/bin/bun"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/checkout@v4
+        with:
+          repository: cline/cline
+          ref: cli-v${{ inputs.cline_version }}
+          path: cline
+      - run: for p in legacy/patches/cline/*.patch; do git -C cline apply "$GITHUB_WORKSPACE/$p"; done
+      - working-directory: cline
+        run: bun install
+      - working-directory: cline/apps/cli
+        run: bun script/build.ts --single
+      - name: TUI under strace, in its own PID namespace
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          for mode in native Conroe; do
+            docker run --rm --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+              -v "$GITHUB_WORKSPACE/cline/apps/cli/dist/cli-linux-x64:/cline:ro" -v "$RUNNER_TEMP/out:/out" \
+              -e MODE=$mode -e TERM=xterm-256color ubuntu:24.04 bash -c '
+                set -u
+                apt-get update -qq >/dev/null && apt-get install -y -qq strace qemu-user procps >/dev/null
+                useradd -m u && mkdir -p /home/u/proj && chown -R u /home/u
+                run=/cline/bin/cline; [ "$MODE" = native ] || run="qemu-x86_64 -cpu $MODE /cline/bin/cline"
+                # -I3: strace blocks fatal signals, so it survives a kill(-1) and records it.
+                su u -c "cd ~/proj && CLINE_NO_AUTO_UPDATE=1 timeout -k 10 120 script -qefc \"stty cols 120 rows 40; exec strace -I3 -f -tt -o /out/strace-$MODE.txt -e trace=kill,tkill,tgkill,pidfd_send_signal,rt_sigqueueinfo,execve,setsid,setpgid $run\" /dev/null </dev/zero >/out/tty-$MODE.txt 2>&1"
+                echo "[$MODE] exit $?"
+                ps -eo pid,ppid,pgid,sid,user,stat,args
+              '
+            echo "=== $MODE: signals sent (kill/tgkill/...) ==="
+            grep -E 'kill\(|tgkill\(|pidfd_send_signal\(|rt_sigqueueinfo\(' "$RUNNER_TEMP/out/strace-$mode.txt" | grep -v 'SIG_0\|, 0)' | head -60
+            echo "=== $MODE: execve / setsid ==="
+            grep -E 'execve\(|setsid\(|setpgid\(' "$RUNNER_TEMP/out/strace-$mode.txt" | cut -c1-300 | head -40
+            echo "=== $MODE: last screen ==="
+            tr -d '\033' < "$RUNNER_TEMP/out/tty-$mode.txt" | sed 's/\[[0-9;?]*[a-zA-Z]//g' | tr -s ' \n' | tail -c 1200; echo
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cline-strace
+          path: ${{ runner.temp }}/out
