@@ -92,24 +92,29 @@ jobs:
       - name: opencode server (HTTP API) on a Core 2
         timeout-minutes: 10
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           oc="$GITHUB_WORKSPACE/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode"
           export OPENCODE_DISABLE_AUTOUPDATE=1 HOME="$RUNNER_TEMP/home"
           cd "$GITHUB_WORKSPACE/opencode"
           # Own session, so the server's shutdown signals can't reach this shell (GitHub runs it with bash -e).
-          setsid qemu-x86_64 -cpu Conroe "$oc" serve --port 4199 --hostname 127.0.0.1 --print-logs > "$RUNNER_TEMP/serve.log" 2>&1 &
-          pid=$!
+          # Two tries of ~3 min: qemu-user can deadlock a fork child of a multi-threaded guest (see old-cpus.sh).
           ok=0
-          for i in $(seq 1 120); do
-            if curl -fsS --max-time 20 http://127.0.0.1:4199/config >/dev/null 2>&1; then ok=1; break; fi
-            kill -0 $pid 2>/dev/null || break
-            sleep 2
+          for attempt in 1 2; do
+            setsid qemu-x86_64 -cpu Conroe "$oc" serve --port 4199 --hostname 127.0.0.1 --print-logs >> "$RUNNER_TEMP/serve.log" 2>&1 &
+            pid=$!; deadline=$(( $(date +%s) + 180 ))
+            while [ $(date +%s) -lt $deadline ]; do
+              if curl -fsS --max-time 20 http://127.0.0.1:4199/config >/dev/null 2>&1; then ok=1; break; fi
+              kill -0 $pid 2>/dev/null || break
+              sleep 2
+            done
+            [ $ok = 1 ] && curl -fsS --max-time 30 http://127.0.0.1:4199/config | head -c 400; echo
+            [ $ok = 1 ] && { curl -fsS --max-time 30 http://127.0.0.1:4199/session | head -c 400 || ok=0; }; echo
+            kill -- -$pid 2>/dev/null || kill $pid 2>/dev/null || true
+            sleep 5; kill -9 -- -$pid 2>/dev/null || true
+            wait $pid 2>/dev/null || true
+            [ $ok = 1 ] && break
+            echo "::warning::opencode serve did not answer (try $attempt)"
           done
-          curl -fsS --max-time 30 http://127.0.0.1:4199/config | head -c 400 || true; echo
-          curl -fsS --max-time 30 http://127.0.0.1:4199/session | head -c 400 || true; echo
-          kill -- -$pid 2>/dev/null || kill $pid 2>/dev/null || true
-          sleep 5; kill -9 -- -$pid 2>/dev/null || true
-          wait $pid 2>/dev/null || true
           tail -30 "$RUNNER_TEMP/serve.log" || true
           if grep -qE 'Illegal instruction|SIGILL' "$RUNNER_TEMP/serve.log"; then echo "::error::SIGILL"; exit 1; fi
           [ $ok = 1 ] || { echo "::error::opencode serve never answered"; exit 1; }

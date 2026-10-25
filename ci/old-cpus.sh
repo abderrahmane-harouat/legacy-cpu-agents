@@ -2,7 +2,7 @@
 # Run a command under QEMU user-mode emulation of old x86-64 CPUs. QEMU's TCG raises SIGILL for any instruction
 # whose CPUID feature the emulated model lacks, which is exactly what the real hardware does.
 #
-#   old-cpus.sh [--expect-sigill] <program> [args...]
+#   old-cpus.sh [--expect-sigill] <program> [args...]      (LIMIT=<seconds> per run, default 600)
 #
 # Models (all lack SSE4.1, SSE4.2, POPCNT, AVX, BMI):
 #   Conroe        Core 2 Duo / Pentium Dual-Core / Celeron E (SSE3, SSSE3)
@@ -13,17 +13,24 @@ expect_sigill=0
 if [ "${1:-}" = --expect-sigill ]; then expect_sigill=1; shift; fi
 QEMU=${QEMU:-qemu-x86_64}
 CPUS=${CPUS:-"Conroe Opteron_G2 floor"}
+LIMIT=${LIMIT:-600}
 status=0
 for cpu in $CPUS; do
   model=$cpu
   [ "$cpu" = floor ] && model="qemu64,-sse3,-ssse3,-sse4.1,-sse4.2,-popcnt,-abm,-sse4a,-monitor,+cx16,+lahf-lm"
-  echo "::group::[$cpu] $*"
-  start=$(date +%s)
   log=$(mktemp)
-  "$QEMU" -cpu "$model" "$@" 2>&1 | tee "$log"
-  rc=${PIPESTATUS[0]}
-  echo "::endgroup::"
-  echo "[$cpu] exit $rc after $(( $(date +%s) - start ))s"
+  for attempt in 1 2; do
+    echo "::group::[$cpu] $*"
+    start=$(date +%s)
+    timeout -k 10 "$LIMIT" "$QEMU" -cpu "$model" "$@" 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
+    echo "::endgroup::"
+    echo "[$cpu] exit $rc after $(( $(date +%s) - start ))s"
+    # 124/137 = timed out. qemu-user can deadlock a multi-threaded guest's fork child before it execs (one of
+    # QEMU's own locks was held by another thread at fork time); real CPUs have no such step, so retry once.
+    if [ $rc -ne 124 ] && [ $rc -ne 137 ]; then break; fi
+    [ $attempt = 1 ] && echo "::warning::[$cpu] no exit within ${LIMIT}s, retrying once (qemu-user fork deadlock?)"
+  done
   # 132 = 128 + SIGILL. Bun's crash handler catches SIGILL itself and reports "Illegal instruction".
   sigill=0
   if [ $rc -eq 132 ] || grep -qE 'Illegal instruction|SIGILL' "$log"; then sigill=1; fi
