@@ -81,14 +81,27 @@ jobs:
           mkdir -p "$RUNNER_TEMP/upstream" && cd "$RUNNER_TEMP/upstream"
           curl -fsSL "https://github.com/oven-sh/WebKit/releases/download/autobuild-$SHA/bun-webkit-linux-amd64.tar.gz" | tar xz bun-webkit/bin/jsc
           CPUS="Conroe" bash "$GITHUB_WORKSPACE/legacy/ci/old-cpus.sh" --expect-sigill ./bun-webkit/bin/jsc "$GITHUB_WORKSPACE/legacy/ci/jit-smoke.js"
+      - name: jsc, WebAssembly in the interpreter only (IPInt)
+        run: bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/bun-webkit/bin/jsc" --useBBQJIT=false --useOMGJIT=false legacy/ci/jit-smoke.js
+      - name: jsc, WebAssembly up to BBQ (no OMG)
+        run: bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/bun-webkit/bin/jsc" --useOMGJIT=false legacy/ci/jit-smoke.js
       - name: jsc on Core 2 / Athlon 64 / SSE2 floor
         run: bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/bun-webkit/bin/jsc" legacy/ci/jit-smoke.js
       - name: jsc with the JIT tiers forced (DFG/FTL early)
         run: |
           bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/bun-webkit/bin/jsc" --thresholdForJITAfterWarmUp=10 \
             --thresholdForOptimizeAfterWarmUp=20 --thresholdForFTLOptimizeAfterWarmUp=50 legacy/ci/jit-smoke.js
-      - name: jsc with WebAssembly in the interpreter only (IPInt, no BBQ/OMG)
-        run: bash legacy/ci/old-cpus.sh "$RUNNER_TEMP/bun-webkit/bin/jsc" --useBBQJIT=false --useOMGJIT=false legacy/ci/jit-smoke.js
+      - name: Where did it crash? (gdb backtrace under QEMU Conroe)
+        if: failure()
+        run: |
+          sudo apt-get install -y -qq gdb >/dev/null
+          j="$RUNNER_TEMP/bun-webkit/bin/jsc"
+          qemu-x86_64 -cpu Conroe -g 1235 "$j" legacy/ci/jit-smoke.js &
+          sleep 5
+          timeout 600 gdb -q -batch -ex 'target remote :1235' \
+            -ex 'handle SIGSEGV nostop noprint pass' -ex 'handle SIGUSR1 nostop noprint pass' -ex 'handle SIGUSR2 nostop noprint pass' \
+            -ex 'handle SIGBUS nostop noprint pass' -ex 'continue' -ex 'info registers rip' -ex 'x/8i $pc-16' -ex 'bt 30' "$j" 2>&1 | tail -60 || true
+          kill %1 2>/dev/null || true
       - name: Publish release autobuild-${{ steps.sha.outputs.sha }}
         env:
           GH_TOKEN: ${{ github.token }}

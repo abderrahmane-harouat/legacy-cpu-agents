@@ -264,3 +264,41 @@ index d050cb55..2f17d802 100644
      void cvtsd2ss_rr(XMMRegisterID src, XMMRegisterID dst)
      {
          m_formatter.prefix(PRE_SSE_F2);
+diff --git a/Source/JavaScriptCore/wasm/WasmOMGIRGenerator.cpp b/Source/JavaScriptCore/wasm/WasmOMGIRGenerator.cpp
+index d82f35c3..dbce3e8b 100644
+--- a/Source/JavaScriptCore/wasm/WasmOMGIRGenerator.cpp
++++ b/Source/JavaScriptCore/wasm/WasmOMGIRGenerator.cpp
+@@ -7426,7 +7426,16 @@ auto OMGIRGenerator::addF64Nearest(ExpressionType argVar, ExpressionType& result
+     Value* arg = get(argVar);
+     PatchpointValue* patchpoint = m_currentBlock->appendNew<PatchpointValue>(m_proc, Double, origin());
+     patchpoint->append(arg, ValueRep::SomeRegister);
++#if CPU(X86_64)
++    // bun-legacy: without SSE4.1 the MacroAssembler rounds through its scratch registers, which Air may otherwise
++    // have allocated.
++    if (!MacroAssembler::supportsFloatingPointRounding()) {
++        patchpoint->clobber(RegisterSet::macroClobberedGPRs());
++        patchpoint->clobber(RegisterSet::macroClobberedFPRs());
++    }
++#endif
+     patchpoint->setGenerator([=] (CCallHelpers& jit, const StackmapGenerationParams& params) {
++        AllowMacroScratchRegisterUsage allowScratch(jit);
+         jit.roundTowardNearestIntDouble(params[1].fpr(), params[0].fpr());
+     });
+     patchpoint->effects = Effects::none();
+@@ -7439,7 +7448,16 @@ auto OMGIRGenerator::addF32Nearest(ExpressionType argVar, ExpressionType& result
+     Value* arg = get(argVar);
+     PatchpointValue* patchpoint = m_currentBlock->appendNew<PatchpointValue>(m_proc, Float, origin());
+     patchpoint->append(arg, ValueRep::SomeRegister);
++#if CPU(X86_64)
++    // bun-legacy: without SSE4.1 the MacroAssembler rounds through its scratch registers, which Air may otherwise
++    // have allocated.
++    if (!MacroAssembler::supportsFloatingPointRounding()) {
++        patchpoint->clobber(RegisterSet::macroClobberedGPRs());
++        patchpoint->clobber(RegisterSet::macroClobberedFPRs());
++    }
++#endif
+     patchpoint->setGenerator([=] (CCallHelpers& jit, const StackmapGenerationParams& params) {
++        AllowMacroScratchRegisterUsage allowScratch(jit);
+         jit.roundTowardNearestIntFloat(params[1].fpr(), params[0].fpr());
+     });
+     patchpoint->effects = Effects::none();
