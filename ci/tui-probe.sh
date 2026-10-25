@@ -9,7 +9,8 @@ cpu=$1 secs=$2; shift 2
 [ "$cpu" = floor ] && cpu="qemu64,-sse3,-ssse3,-sse4.1,-sse4.2,-popcnt,-abm,-sse4a,-monitor,+cx16,+lahf-lm"
 log=$(mktemp)
 cmd=$(printf '%q ' "${QEMU:-qemu-x86_64}" -cpu "$cpu" "$@")
-TERM=xterm-256color COLUMNS=120 LINES=40 timeout --signal=TERM --kill-after=20 "$secs" \
+# Own session: an app that signals its whole process group on exit must not take this script down with it.
+TERM=xterm-256color COLUMNS=120 LINES=40 setsid --wait timeout --signal=TERM --kill-after=20 "$secs" \
   script -qefc "stty cols 120 rows 40; exec $cmd" /dev/null >"$log" 2>&1 </dev/zero
 rc=$?
 bytes=$(wc -c <"$log")

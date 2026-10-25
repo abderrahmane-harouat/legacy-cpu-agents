@@ -95,7 +95,8 @@ jobs:
           oc="$GITHUB_WORKSPACE/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode"
           export OPENCODE_DISABLE_AUTOUPDATE=1 HOME="$RUNNER_TEMP/home"
           cd "$GITHUB_WORKSPACE/opencode"
-          qemu-x86_64 -cpu Conroe "$oc" serve --port 4199 --hostname 127.0.0.1 > "$RUNNER_TEMP/serve.log" 2>&1 &
+          # Own session, so the server's shutdown signals can't reach this shell (GitHub runs it with bash -e).
+          setsid qemu-x86_64 -cpu Conroe "$oc" serve --port 4199 --hostname 127.0.0.1 > "$RUNNER_TEMP/serve.log" 2>&1 &
           pid=$!
           ok=0
           for i in $(seq 1 120); do
@@ -103,11 +104,13 @@ jobs:
             kill -0 $pid 2>/dev/null || break
             sleep 2
           done
-          curl -fsS http://127.0.0.1:4199/config | head -c 400; echo
-          curl -fsS http://127.0.0.1:4199/session | head -c 400; echo
-          kill $pid 2>/dev/null; wait $pid 2>/dev/null
-          cat "$RUNNER_TEMP/serve.log" | tail -30
-          ! grep -qE 'Illegal instruction|SIGILL' "$RUNNER_TEMP/serve.log" && [ $ok = 1 ]
+          curl -fsS http://127.0.0.1:4199/config | head -c 400 || true; echo
+          curl -fsS http://127.0.0.1:4199/session | head -c 400 || true; echo
+          kill -- -$pid 2>/dev/null || kill $pid 2>/dev/null || true
+          wait $pid 2>/dev/null || true
+          tail -30 "$RUNNER_TEMP/serve.log" || true
+          if grep -qE 'Illegal instruction|SIGILL' "$RUNNER_TEMP/serve.log"; then echo "::error::SIGILL"; exit 1; fi
+          [ $ok = 1 ] || { echo "::error::opencode serve never answered"; exit 1; }
       - name: opencode TUI on Core 2 / Athlon 64 / SSE2 floor
         run: |
           set -euo pipefail
@@ -177,10 +180,11 @@ jobs:
           export CLINE_DIR="$HOME/.cline" CLINE_DATA_DIR="$HOME/data" CLINE_HUB_DISCOVERY_PATH="$HOME/hub.json"
           # The CLI side runs emulated; the daemon it forks runs natively (qemu-user does not follow exec), the TUI
           # step below covers the emulated in-process paths.
-          qemu-x86_64 -cpu Conroe "$c" hub start; rc1=$?
+          rc1=0; setsid --wait qemu-x86_64 -cpu Conroe "$c" hub start || rc1=$?
           sleep 20
-          qemu-x86_64 -cpu Conroe "$c" hub status | tee "$RUNNER_TEMP/hub.json"; rc2=$?
-          qemu-x86_64 -cpu Conroe "$c" hub stop
+          rc2=0; setsid --wait qemu-x86_64 -cpu Conroe "$c" hub status > "$RUNNER_TEMP/hub.json" || rc2=$?
+          cat "$RUNNER_TEMP/hub.json"
+          setsid --wait qemu-x86_64 -cpu Conroe "$c" hub stop || true
           [ $rc1 = 0 ] && [ $rc2 = 0 ] && grep -q '"running": *true' "$RUNNER_TEMP/hub.json"
       - name: Cline TUI on Core 2 / Athlon 64 / SSE2 floor
         run: |

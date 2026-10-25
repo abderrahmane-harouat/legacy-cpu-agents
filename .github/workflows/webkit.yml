@@ -46,19 +46,6 @@ jobs:
             !Websites/
             !ManualTests/
             !WebDriverTests/
-      - name: Control (one-off) — the unpatched legacy jsc must SIGILL in IPInt rounding
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.sha.outputs.sha }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user >/dev/null
-          mkdir -p "$RUNNER_TEMP/prev" && cd "$RUNNER_TEMP/prev"
-          gh release download "autobuild-$SHA" -R "$GITHUB_REPOSITORY" -p bun-webkit-linux-amd64.tar.gz
-          tar xzf bun-webkit-linux-amd64.tar.gz bun-webkit/bin/jsc
-          CPUS=Conroe bash "$GITHUB_WORKSPACE/legacy/ci/old-cpus.sh" --expect-sigill ./bun-webkit/bin/jsc \
-            --useBBQJIT=false --useOMGJIT=false "$GITHUB_WORKSPACE/legacy/ci/jit-smoke.js"
       - name: Apply legacy-CPU patches
         run: |
           set -euo pipefail
