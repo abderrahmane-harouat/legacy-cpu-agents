@@ -10,8 +10,10 @@ cpu=$1 secs=$2; shift 2
 log=$(mktemp)
 cmd=$(printf '%q ' "${QEMU:-qemu-x86_64}" -cpu "$cpu" "$@")
 # Own session: an app that signals its whole process group on exit must not take this script down with it.
+# Stdin stays open but silent: </dev/zero made `script` buffer zeros faster than an emulated TUI reads them
+# (14 GB in 30 s, and the runner was killed for lack of memory).
 TERM=xterm-256color COLUMNS=120 LINES=40 setsid --wait timeout --signal=TERM --kill-after=20 "$secs" \
-  script -qefc "stty cols 120 rows 40; exec $cmd" /dev/null >"$log" 2>&1 </dev/zero
+  script -qefc "stty cols 120 rows 40; exec $cmd" /dev/null >"$log" 2>&1 < <(sleep $((secs + 60)))
 rc=$?
 bytes=$(wc -c <"$log")
 echo "[$1] exit $rc after ${secs}s, $bytes bytes of terminal output"
