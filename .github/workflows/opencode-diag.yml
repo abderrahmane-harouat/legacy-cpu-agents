@@ -1,0 +1,92 @@
+name: "diag: opencode serve"
+
+# `opencode serve` under an emulated Core 2 accepted the connection on /config and never answered (27 min). Run it
+# natively and emulated with debug logs and bounded requests, and show what it is doing while a request hangs.
+on:
+  workflow_dispatch:
+    inputs:
+      bun_version:
+        default: "1.4.4"
+      opencode_version:
+        default: "1.19.4"
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: ${{ inputs.bun_version }}
+
+jobs:
+  opencode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: legacy
+      - name: Install the legacy bun
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "bun-v$BUN_VERSION-legacy" -R "$GITHUB_REPOSITORY" -p bun-linux-x64-legacy.zip -D "$RUNNER_TEMP"
+          unzip -q -o "$RUNNER_TEMP/bun-linux-x64-legacy.zip" -d "$RUNNER_TEMP"
+          mkdir -p "$HOME/.bun/bin"
+          install -m755 "$RUNNER_TEMP/bun-linux-x64-legacy/bun" "$HOME/.bun/bin/bun"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          sudo apt-get update && sudo apt-get install -y qemu-user gdb
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/checkout@v4
+        with:
+          repository: anomalyco/opencode
+          ref: v${{ inputs.opencode_version }}
+          path: opencode
+      - working-directory: opencode
+        run: |
+          python3 -m pip install setuptools >/dev/null 2>&1 || true
+          bun install
+      - working-directory: opencode
+        env:
+          OPENCODE_VERSION: ${{ inputs.opencode_version }}
+          OPENCODE_CHANNEL: latest
+        run: ./packages/opencode/script/build.ts --single
+      - name: serve, native then emulated
+        run: |
+          set -uo pipefail
+          oc="$GITHUB_WORKSPACE/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode"
+          export OPENCODE_DISABLE_AUTOUPDATE=1
+          cd "$GITHUB_WORKSPACE/opencode"
+          port=4200
+          for mode in native Conroe; do
+            port=$((port+1))
+            export HOME="$RUNNER_TEMP/home-$mode" && mkdir -p "$HOME"
+            run=("$oc"); [ $mode = native ] || run=(qemu-x86_64 -cpu $mode "$oc")
+            log="$RUNNER_TEMP/serve-$mode.log"
+            setsid "${run[@]}" serve --port $port --hostname 127.0.0.1 --print-logs --log-level DEBUG >"$log" 2>&1 &
+            pid=$!
+            t0=$(date +%s) ok=0
+            for i in $(seq 1 40); do
+              code=$(curl -s -o "$RUNNER_TEMP/body-$mode" -w '%{http_code}' --max-time 15 http://127.0.0.1:$port/config)
+              echo "[$mode] t=$(( $(date +%s) - t0 ))s /config -> $code"
+              [ "$code" = 200 ] && { ok=1; break; }
+              kill -0 $pid 2>/dev/null || { echo "[$mode] server exited"; break; }
+              [ $i = 6 ] && { echo "--- process tree ---"; ps -o pid,ppid,stat,etime,pcpu,rss,args --forest -g $pid | cut -c1-220; }
+              sleep 3
+            done
+            echo "[$mode] ok=$ok"; head -c 300 "$RUNNER_TEMP/body-$mode" 2>/dev/null; echo
+            curl -s --max-time 30 -o /dev/null -w "[$mode] /session -> %{http_code}\n" http://127.0.0.1:$port/session
+            echo "--- process tree at end ---"; ps -o pid,ppid,stat,etime,pcpu,rss,args --forest -g $pid | cut -c1-220
+            if [ $ok = 0 ] && [ $mode = native ]; then
+              echo "--- native thread stacks ---"
+              sudo gdb -p $(pgrep -f -n "opencode-linux-x64/bin/opencode serve") -batch -ex 'thread apply all bt 12' 2>/dev/null | grep -E '^Thread|^#' | head -150
+            fi
+            kill -- -$pid 2>/dev/null; sleep 3; kill -9 -- -$pid 2>/dev/null
+            echo "--- $mode log (last 120 lines) ---"; tail -120 "$log" | cut -c1-300
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: opencode-serve
+          path: ${{ runner.temp }}/serve-*.log
