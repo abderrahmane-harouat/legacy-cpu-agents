@@ -3,6 +3,22 @@
 AI coding agents — **opencode**, **Cline CLI**, **Antigravity CLI** — on old x86-64 PCs: Core 2 Duo/Quad, Pentium
 Dual-Core, Celeron, Athlon 64 X2, Phenom II and anything else without SSE4.2/POPCNT/AVX.
 
+## Symptoms this fixes
+
+On an old PC, `opencode`, `cline`, `bun` or `agy` dies right away with one of:
+
+```
+Illegal instruction (core dumped)
+zsh: illegal hardware instruction  opencode
+panic(main thread): Illegal instruction at address 0x...
+CPU lacks AVX support, strange crashes may occur
+```
+
+Typical CPUs: Intel Core 2 Duo / Core 2 Quad, Pentium Dual-Core (E2xxx/E5xxx/E6xxx), Celeron (E1xxx/E3xxx),
+Pentium 4 64-bit, Xeon 5100/5300/5400; AMD Athlon 64 / Athlon 64 X2, Athlon II, Phenom / Phenom II, Turion 64,
+Opteron (before Bulldozer). Check yours with `grep -o -w 'sse4_2\|popcnt\|avx' /proc/cpuinfo | sort -u`: if
+`sse4_2` is missing, the official builds can't run and these can.
+
 ## Why the official builds crash (`Illegal instruction (core dumped)`)
 
 opencode and Cline are `bun build --compile` executables: the Bun runtime is inside them. Bun 1.4's only x64 build
