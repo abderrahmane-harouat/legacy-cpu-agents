@@ -43,15 +43,65 @@ hardware does. A control run of the official binary on the same model must SIGIL
 
 ## Install on the old PC
 
+Debian / Ubuntu / Mint, 64-bit (x86_64). Three steps:
+
+**1. Run the installer**
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/abderrahmane-harouat/legacy-cpu-agents/main/install.sh | bash
-# or only some:  ... | bash -s -- opencode cline
 ```
 
-Installs `bun`, `opencode`, `cline` and `agy` into `~/.local/bin` (Debian/Ubuntu/Mint x86_64, glibc 2.17+).
-Remove the official npm builds first if you installed them (`npm uninstall -g opencode-ai cline`), and don't run
-`opencode upgrade` — it would fetch the official build again. Antigravity under QEMU is slower than native
-(everything is emulated); it self-updates in place and keeps working through the wrapper.
+That installs all four: `bun`, `opencode`, `cline` and `agy`. For only some of them, list them at the end:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/abderrahmane-harouat/legacy-cpu-agents/main/install.sh | bash -s -- opencode cline
+```
+
+**2. Open a new terminal**
+
+The terminal you installed from still remembers the old programs. Close it and open a new one.
+
+**3. Check that the right versions run**
+
+```sh
+which -a opencode cline
+```
+
+The **first** line for each must be in `~/.local/bin`, for example `/home/you/.local/bin/opencode`. Then run
+`opencode` or `cline`.
+
+### Already had opencode or Cline installed?
+
+If you installed the official opencode or Cline before, those copies are still on the PC. They are the ones that
+crash with `Illegal instruction (core dumped)`, and they can **shadow** (hide) the new builds: typing `opencode`
+runs whichever copy your PATH finds first.
+
+The installer handles this for you:
+
+- it adds a line at the **end** of `~/.bashrc` (and `~/.zshrc` if you have one) that puts `~/.local/bin` first;
+- it lists every older copy it finds, each with the exact command that removes it.
+
+Removing the old copies is optional once the new ones come first, but it avoids confusion. The usual places are:
+
+| Old copy came from | Where it lives | Remove with |
+| --- | --- | --- |
+| npm (`npm i -g opencode-ai` / `npm i -g cline`) | npm's global folder | `npm uninstall -g opencode-ai cline` |
+| opencode's own installer (`curl https://opencode.ai/install`) | `~/.opencode/bin` | `rm -rf ~/.opencode`, then delete its `PATH` line in `~/.bashrc` |
+| Bun (`bun add -g ...`) | `~/.bun/bin` | `bun remove -g opencode-ai cline` |
+
+If `which -a` still shows the old copy first in a new terminal, run `hash -r` (it clears the shell's memory of
+where programs are) or run the installer again.
+
+### Good to know
+
+- **Don't run `opencode upgrade`.** It would replace this build with the official one, which crashes on old CPUs.
+  Cline's auto-update is already turned off in this build.
+- To update later, just run the installer again: it always fetches the newest builds from this repo.
+- **Antigravity (`agy`)** is closed source, so it can't be rebuilt. If it crashes on your CPU, the installer runs
+  the official binary through QEMU, which provides the missing instructions in software. It's slower than native,
+  and it keeps working after Antigravity updates itself.
+- Everything goes into `~/.local/bin` and `~/.local/share/legacy-cpu-agents`; nothing needs `sudo` except
+  installing QEMU for `agy`.
 
 ## Rebuilding for a new upstream release
 

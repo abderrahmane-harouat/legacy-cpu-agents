@@ -130,14 +130,40 @@ for t in "${tools[@]}"; do
   esac
 done
 
-case ":$PATH:" in
-  *":$BIN:"*) ;;
-  *) warn "$BIN is not on your PATH. Add this to ~/.bashrc:  export PATH=\"$BIN:\$PATH\"" ;;
-esac
-for t in opencode cline bun; do
-  p=$(command -v "$t" 2>/dev/null || true)
-  if [ -n "$p" ] && [ "$p" != "$BIN/$t" ]; then
-    warn "'$t' on your PATH is $p (probably the official npm build that crashes); remove it with: npm uninstall -g ${t/opencode/opencode-ai}"
-  fi
+# Official installers put their own directory in front of PATH from ~/.bashrc (opencode: ~/.opencode/bin, Bun:
+# ~/.bun/bin, npm: its global bin), so an earlier opencode/cline/bun would still win over these. Re-append one line
+# at the very end of each shell rc file on every run: the last line to prepend wins.
+marker='# legacy-cpu-agents: keep the old-CPU builds first on PATH'
+for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+  [ -f "$rc" ] || [ "$rc" = "$HOME/.bashrc" ] || continue
+  touch "$rc"
+  # Drop our previous marker line and the export after it, then append them again.
+  awk -v m="$marker" '$0 == m { skip = 1; next } skip { skip = 0; next } { print }' "$rc" >"$tmp/rc" && cat "$tmp/rc" >"$rc"
+  printf '%s\nexport PATH="%s:$PATH"\n' "$marker" "$BIN" >>"$rc"
 done
-say "done"
+
+# Every other copy of the installed tools that PATH can reach, and how to remove it.
+removal_hint() { # <tool> <path>
+  local real; real=$(readlink -f "$2" 2>/dev/null || echo "$2")
+  case "$real" in
+    */node_modules/*) case "$1" in opencode) echo "npm uninstall -g opencode-ai" ;; *) echo "npm uninstall -g $1" ;; esac ;;
+    "$HOME/.opencode/"*) echo "rm -rf ~/.opencode   (and delete the ~/.opencode/bin PATH line in ~/.bashrc)" ;;
+    "$HOME/.bun/bin/"*) [ "$1" = bun ] && echo "rm ~/.bun/bin/bun ~/.bun/bin/bunx" || echo "bun remove -g ${1/opencode/opencode-ai}" ;;
+    "$HOME"/*) echo "rm '$2'" ;;
+    *) echo "sudo rm '$2'" ;;
+  esac
+}
+found=0
+for t in "${tools[@]}"; do
+  [ "$t" = antigravity ] && t=agy
+  [ "$t" = agy ] && continue
+  while IFS= read -r p; do
+    [ -n "$p" ] && [ "$p" != "$BIN/$t" ] || continue
+    [ $found = 1 ] || warn "older copies are still installed (they crash on this CPU). New terminals use the old-CPU builds anyway, but you can remove them:"
+    found=1
+    printf '    %-34s remove with: %s\n' "$p" "$(removal_hint "$t" "$p")" >&2
+  done < <(type -ap "$t" 2>/dev/null | awk '!seen[$0]++')
+done
+
+say "done. Open a NEW terminal (or run:  hash -r; export PATH=\"$BIN:\$PATH\"), then check with:  which -a opencode cline"
+
