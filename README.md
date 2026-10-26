@@ -15,9 +15,9 @@ CPU lacks AVX support, strange crashes may occur
 ```
 
 Typical CPUs: Intel Core 2 Duo / Core 2 Quad, Pentium Dual-Core (E2xxx/E5xxx/E6xxx), Celeron (E1xxx/E3xxx),
-Pentium 4 64-bit, Xeon 5100/5300/5400; AMD Athlon 64 / Athlon 64 X2, Athlon II, Phenom / Phenom II, Turion 64,
-Opteron (before Bulldozer). Check yours with `grep -o -w 'sse4_2\|popcnt\|avx' /proc/cpuinfo | sort -u`: if
-`sse4_2` is missing, the official builds can't run and these can.
+Xeon 5100/5300/5400; AMD Athlon 64 X2, Athlon II, Phenom / Phenom II, Turion 64 X2, Opteron (before Bulldozer).
+Check yours with `grep -o -w 'sse4_2\|cx16' /proc/cpuinfo | sort -u`: if `sse4_2` is missing, the official builds
+can't run; if `cx16` is there, these can. (The first single-core Athlon 64s and early 64-bit Pentium 4s lack `cx16`.)
 
 ## Why the official builds crash (`Illegal instruction (core dumped)`)
 
