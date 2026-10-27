@@ -123,3 +123,9 @@ where programs are) or run the installer again.
 
 Run the workflows in order from the Actions tab with the new versions: `1. WebKit` (Bun version) →
 `2. Bun` (Bun version) → `3. Apps` (Bun, opencode and Cline versions).
+
+## License
+
+The scripts, workflows and docs in this repo are [MIT](LICENSE). Each file in [`patches/`](patches) modifies an
+upstream project and is under that project's license (WebKit: BSD/LGPL, Bun: MIT, Cline: Apache-2.0), and so are
+the binaries the workflows build.
