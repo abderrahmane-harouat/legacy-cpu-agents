@@ -5,7 +5,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/abderrahmane-harouat/legacy-cpu-agents/main/install.sh | bash
 #   curl -fsSL .../install.sh | bash -s -- opencode cline      # only some of: bun opencode cline agy
 #
-# Installs into ~/.local/bin (override with LEGACY_BIN_DIR). Debian/Ubuntu/Mint x86_64, glibc 2.17+.
+# Installs into ~/.local/bin (override with LEGACY_BIN_DIR). Any x86_64 Linux with glibc 2.17+: Debian/Ubuntu/Mint,
+# Arch, Fedora and openSUSE get QEMU (for agy) from their package manager when it is needed.
 set -euo pipefail
 
 REPO=abderrahmane-harouat/legacy-cpu-agents
@@ -18,9 +19,19 @@ say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Install packages with whichever package manager this distro has. <pacman name> <apt name> <dnf name> <zypper name>
+pkg_install() {
+  if command -v pacman >/dev/null; then sudo pacman -S --needed --noconfirm "$1"
+  elif command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y "$2"
+  elif command -v dnf >/dev/null; then sudo dnf install -y "$3"
+  elif command -v zypper >/dev/null; then sudo zypper --non-interactive install "$4"
+  else return 1
+  fi
+}
+
 [ "$(uname -s)" = Linux ] || die "this installer is for Linux"
 [ "$(uname -m)" = x86_64 ] || die "needs a 64-bit x86 CPU and a 64-bit (amd64) Linux; found $(uname -m)"
-command -v curl >/dev/null || die "install curl first: sudo apt-get install -y curl"
+command -v curl >/dev/null || die "install curl first (Arch: sudo pacman -S curl; Debian/Ubuntu: sudo apt-get install curl)"
 command -v tar >/dev/null || die "install tar first"
 
 flags=$(grep -m1 '^flags' /proc/cpuinfo || true)
@@ -107,8 +118,9 @@ install_agy() {
   else
     say "agy needs instructions this CPU lacks (exit $rc); running it through QEMU user-mode emulation"
     if ! command -v qemu-x86_64 >/dev/null; then
-      say "installing qemu-user (needs sudo)"
-      sudo apt-get update && sudo apt-get install -y qemu-user || die "could not install qemu-user"
+      say "installing QEMU user-mode emulation (needs sudo)"
+      pkg_install qemu-user qemu-user qemu-user qemu-linux-user ||
+        die "could not install QEMU; install your distro's qemu-user package (it provides qemu-x86_64) and run this again"
     fi
     cat >"$BIN/agy" <<EOF
 #!/bin/sh
@@ -141,6 +153,15 @@ for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
   awk -v m="$marker" '$0 == m { skip = 1; next } skip { skip = 0; next } { print }' "$rc" >"$tmp/rc" && cat "$tmp/rc" >"$rc"
   printf '%s\nexport PATH="%s:$PATH"\n' "$marker" "$BIN" >>"$rc"
 done
+# fish (the default shell of some desktops, e.g. illogical-impulse on Arch) doesn't read ~/.bashrc: same idea in
+# its config.fish, with fish's own command for putting a directory first.
+fish_rc=${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish
+if command -v fish >/dev/null || [ -f "$fish_rc" ]; then
+  mkdir -p "$(dirname "$fish_rc")"
+  touch "$fish_rc"
+  awk -v m="$marker" '$0 == m { skip = 1; next } skip { skip = 0; next } { print }' "$fish_rc" >"$tmp/rc" && cat "$tmp/rc" >"$fish_rc"
+  printf '%s\nfish_add_path --move --prepend "%s"\n' "$marker" "$BIN" >>"$fish_rc"
+fi
 
 # Every other copy of the installed tools that PATH can reach, and how to remove it.
 removal_hint() { # <tool> <path>

@@ -59,7 +59,7 @@ hardware does. A control run of the official binary on the same model must SIGIL
 
 ## Install on the old PC
 
-Debian / Ubuntu / Mint, 64-bit (x86_64). Three steps:
+Any 64-bit (x86_64) Linux: Debian, Ubuntu, Mint, Arch Linux, Fedora, openSUSE... Three steps:
 
 **1. Run the installer**
 
@@ -94,7 +94,8 @@ runs whichever copy your PATH finds first.
 
 The installer handles this for you:
 
-- it adds a line at the **end** of `~/.bashrc` (and `~/.zshrc` if you have one) that puts `~/.local/bin` first;
+- it adds a line at the **end** of `~/.bashrc` (and `~/.zshrc` and fish's `config.fish` if you use them) that
+  puts `~/.local/bin` first;
 - it lists every older copy it finds, each with the exact command that removes it.
 
 Removing the old copies is optional once the new ones come first, but it avoids confusion. The usual places are:
