@@ -21,7 +21,14 @@ die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Install packages with whichever package manager this distro has. <pacman name> <apt name> <dnf name> <zypper name>
 pkg_install() {
-  if command -v pacman >/dev/null; then sudo pacman -S --needed --noconfirm "$1"
+  if command -v pacman >/dev/null; then
+    # A stale package database names versions the mirrors have already deleted (404s). pacman still
+    # succeeds if one mirror has the file, so hide that noise; if none has it, sync and upgrade
+    # (Arch doesn't support -Sy without -u: a partial upgrade can break the system).
+    sudo pacman -S --needed --noconfirm "$1" 2>/dev/null || {
+      say "pacman's package database is out of date; running a full system upgrade (pacman -Syu) to get $1"
+      sudo pacman -Syu --needed --noconfirm "$1"
+    }
   elif command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y "$2"
   elif command -v dnf >/dev/null; then sudo dnf install -y "$3"
   elif command -v zypper >/dev/null; then sudo zypper --non-interactive install "$4"
