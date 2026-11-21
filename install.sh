@@ -117,8 +117,9 @@ install_agy() {
   [ -x "$dir/antigravity" ] || die "unexpected Antigravity archive layout"
   [ -e "$BIN/agy" ] && [ ! -e "$BIN/agy.official-backup" ] && mv "$BIN/agy" "$BIN/agy.official-backup"
 
+  # The braces make bash's "Illegal instruction (core dumped)" report go to /dev/null too: this crash is expected.
   local rc=0
-  "$dir/antigravity" --version >/dev/null 2>&1 || rc=$?
+  { "$dir/antigravity" --version; } >/dev/null 2>&1 || rc=$?
   if [ $rc -eq 0 ]; then
     ln -sf "$dir/antigravity" "$BIN/agy"
     say "agy runs natively on this CPU"

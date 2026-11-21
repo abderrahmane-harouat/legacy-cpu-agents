@@ -167,9 +167,25 @@ jobs:
       - name: bun install
         working-directory: cline
         run: bun install
+      # node-machine-id runs `cat /var/lib/dbus/machine-id /etc/machine-id || hostname`. Arch has no
+      # /var/lib/dbus/machine-id and no `hostname` by default, so every cline run printed
+      # "/bin/sh: hostname: command not found". Read the hostname from /proc instead (same output).
+      - name: Patch node-machine-id (no `hostname` on Arch)
+        working-directory: cline
+        run: |
+          set -euo pipefail
+          files=$(find . -path ./.git -prune -o -path '*/node-machine-id/dist/index.js' -type f -print)
+          [ -n "$files" ] || { echo "node-machine-id not found"; exit 1; }
+          for f in $files; do
+            sed -i 's#|| hostname )#|| cat /proc/sys/kernel/hostname 2> /dev/null )#' "$f"
+            grep -q 'cat /proc/sys/kernel/hostname' "$f" || { echo "patch did not apply to $f"; exit 1; }
+            echo "patched $f"
+          done
       - name: Build (apps/cli/script/build.ts --single)
         working-directory: cline/apps/cli
-        run: bun script/build.ts --single
+        run: |
+          bun script/build.ts --single
+          ! grep -aqF '|| hostname )' dist/cli-linux-x64/bin/cline || { echo "binary still calls hostname"; exit 1; }
       - name: Check the embedded runtime is the legacy bun
         run: bash legacy/ci/same-runtime.sh "$HOME/.bun/bin/bun" cline/apps/cli/dist/cli-linux-x64/bin/cline
       - name: Cline on Core 2 / Athlon 64 / SSE2 floor
@@ -215,5 +231,5 @@ jobs:
           tag="cline-v$VERSION-legacy"
           gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "Cline CLI $VERSION for legacy x86-64 CPUs" \
-              --notes "Cline CLI $VERSION (cline/cline@cli-v$VERSION) compiled with the legacy Bun $BUN_VERSION, so it runs on Core 2 / Pentium Dual-Core / Athlon 64 class CPUs. One patch: auto-update is off (the official build needs SSE4.2/AVX2). Tested under QEMU (Conroe, Opteron_G2, SSE2 floor): CLI, hub daemon and TUI."
+              --notes "Cline CLI $VERSION (cline/cline@cli-v$VERSION) compiled with the legacy Bun $BUN_VERSION, so it runs on Core 2 / Pentium Dual-Core / Athlon 64 class CPUs. Two patches: auto-update is off (the official build needs SSE4.2/AVX2), and the machine id no longer calls the hostname command, which Arch lacks by default. Tested under QEMU (Conroe, Opteron_G2, SSE2 floor): CLI, hub daemon and TUI."
           gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/cline-linux-x64-legacy.tar.gz" "$RUNNER_TEMP/cline-SHA256SUMS"
