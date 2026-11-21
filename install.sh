@@ -130,7 +130,10 @@ install_agy() {
     ln -sf "$dir/antigravity" "$BIN/agy"
     say "agy runs natively on this CPU"
   else
-    say "agy needs instructions this CPU lacks (exit $rc); running it through QEMU user-mode emulation"
+    # 132 = SIGILL, the expected result on old CPUs; anything else is unusual, so show it.
+    if [ "$rc" -eq 132 ]; then say "agy will run through QEMU (normal on this CPU: the official build needs SSE4.1/SSE4.2)"
+    else say "agy did not start natively (exit $rc); setting it up to run through QEMU"
+    fi
     if ! command -v qemu-x86_64 >/dev/null; then
       say "installing QEMU user-mode emulation (needs sudo)"
       pkg_install qemu-user qemu-user qemu-user qemu-linux-user ||
