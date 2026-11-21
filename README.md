@@ -36,7 +36,7 @@ Rebuilds the whole stack from upstream sources with one change of CPU floor — 
 | --- | --- | --- |
 | `1. WebKit` | JavaScriptCore + ICU (Bun's `bun-webkit-linux-amd64`) | oven-sh/WebKit at the commit the Bun release pins, its own Dockerfile and toolchain image, `MARCH_FLAG` changed, plus [two patches](patches/webkit): WebAssembly `floor`/`ceil`/`trunc`/`nearest` used `roundss`/`roundsd` (SSE4.1) without a CPU check in the interpreter (IPInt) and the BBQ/OMG JITs; both now fall back to SSE2 |
 | `2. Bun` | `bun` 1.4.x | oven-sh/bun + [`patches/bun`](patches/bun): the CPU floor (C/C++, Rust `target-cpu`/features), libspng's SSE4.1 filter level, the WebKit download URL, and bun's own static ISA verifier lowered to SSE2 |
-| `3. Apps` | `opencode`, `cline` | their own release build scripts, run by the legacy bun so `--compile` embeds it; Cline gets [one patch](patches/cline) that disables auto-update to the official AVX build |
+| `3. Apps` | `opencode`, `cline` | their own release build scripts, run by the legacy bun so `--compile` embeds it; Cline gets [one patch](patches/cline) that disables auto-update to the official AVX build, and the build step makes `node-machine-id` read `/proc/sys/kernel/hostname` instead of running `hostname`, which Arch lacks |
 | `4. Antigravity` | — | agy is closed source (Go + C++ built for x86-64-v2): it SIGILLs on a Core 2 at its first SSE4.1 `pmulld`. The installer runs the official binary through `qemu-x86_64 -cpu max` when it detects that |
 
 JavaScriptCore's JIT already picks SSE4.1/POPCNT/AVX at run time from CPUID, and SIMD-heavy libraries (simdutf,
@@ -118,7 +118,7 @@ where programs are) or run the installer again.
   the official binary through QEMU, which provides the missing instructions in software. It's slower than native,
   and it keeps working after Antigravity updates itself.
 - Everything goes into `~/.local/bin` and `~/.local/share/legacy-cpu-agents`; nothing needs `sudo` except
-  installing QEMU for `agy`.
+  installing QEMU for `agy`. On Arch, if pacman's package list is out of date, that runs a full `pacman -Syu`.
 
 ## Rebuilding for a new upstream release
 
