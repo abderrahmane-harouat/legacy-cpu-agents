@@ -101,6 +101,14 @@ install_cline() {
   "$BIN/cline" --version
 }
 
+# probe_rc <cmd...>: run it with no output and print its exit status (132 = SIGILL). On old CPUs agy is expected to
+# crash here, and bash reports a crashed child ("Illegal instruction (core dumped)") on its own stderr, sometimes
+# only after the command's redirections are gone. Run it in a subshell whose stderr is /dev/null for good: the
+# report goes there, and the subshell itself exits normally, so this shell has nothing to report.
+probe_rc() {
+  (exec 2>/dev/null; "$@" >/dev/null </dev/null && echo 0 || echo $?)
+}
+
 # Antigravity CLI is closed source, so it cannot be rebuilt. If the official binary runs here, use it directly;
 # if it dies with an illegal instruction (it needs SSE4.1/SSE4.2/POPCNT), run it through QEMU's user-mode
 # emulator, which provides those instructions in software. The binary itself is the official, unmodified one.
@@ -117,9 +125,7 @@ install_agy() {
   [ -x "$dir/antigravity" ] || die "unexpected Antigravity archive layout"
   [ -e "$BIN/agy" ] && [ ! -e "$BIN/agy.official-backup" ] && mv "$BIN/agy" "$BIN/agy.official-backup"
 
-  # The braces make bash's "Illegal instruction (core dumped)" report go to /dev/null too: this crash is expected.
-  local rc=0
-  { "$dir/antigravity" --version; } >/dev/null 2>&1 || rc=$?
+  local rc; rc=$(probe_rc "$dir/antigravity" --version)
   if [ $rc -eq 0 ]; then
     ln -sf "$dir/antigravity" "$BIN/agy"
     say "agy runs natively on this CPU"

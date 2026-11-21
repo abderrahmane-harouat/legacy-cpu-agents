@@ -32,6 +32,21 @@ jobs:
           mkdir -p "$RUNNER_TEMP/agy" && tar xzf "$RUNNER_TEMP/agy_cli_linux_x64.tar.gz" -C "$RUNNER_TEMP/agy"
           ls -la "$RUNNER_TEMP/agy"; file "$RUNNER_TEMP/agy/"*
           sudo apt-get update && sudo apt-get install -y qemu-user gdb binutils
+      # The installer runs agy once to see if this CPU can run it; on old CPUs it crashes there, and that must not
+      # print bash's "Illegal instruction (core dumped)" report. Test install.sh's own probe_rc on an emulated Core 2.
+      - name: Installer probe stays silent when agy crashes (Core 2)
+        run: |
+          set -uo pipefail
+          export HOME="$RUNNER_TEMP/home" && mkdir -p "$HOME"
+          a="$RUNNER_TEMP/agy/antigravity" p="$RUNNER_TEMP/probe_rc.sh"
+          sed -n '/^probe_rc()/,/^}/p' legacy/install.sh > "$p" && grep -q 'probe_rc()' "$p"
+          bash -c 'rc=0; { qemu-x86_64 -cpu Conroe "$1" --version; } >/dev/null 2>&1 || rc=$?; echo "braces: rc=$rc"' \
+            _ "$a" 2> "$RUNNER_TEMP/braces.err"
+          echo "braces stderr: $(cat "$RUNNER_TEMP/braces.err")"
+          out=$(bash -c 'set -euo pipefail; . "$2"; echo "$(probe_rc qemu-x86_64 -cpu Conroe "$1" --version)"' \
+            _ "$a" "$p" 2> "$RUNNER_TEMP/probe.err")
+          echo "probe_rc: rc=$out, stderr: $(cat "$RUNNER_TEMP/probe.err")"
+          [ "$out" = 132 ] && [ ! -s "$RUNNER_TEMP/probe.err" ]
       - name: Static ISA report
         run: bash legacy/ci/isascan.sh "$RUNNER_TEMP/agy/antigravity"
       - name: Native (modern CPU) baseline
